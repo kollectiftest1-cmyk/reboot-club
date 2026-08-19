@@ -439,35 +439,73 @@ manage migrate --noinput
 ok "Migrations appliquees"
 manage collectstatic --noinput --clear >/dev/null
 ok "Fichiers statiques collectes dans ${DATA_DIR}/staticfiles"
-manage check --deploy 2>&1 | sed 's/^/    /' || true
+# Les avertissements drf_spectacular concernent la documentation OpenAPI et non
+# la securite : on ne remonte que ce qui compte en production.
+DEPLOY_CHECK="$(manage check --deploy 2>&1 || true)"
+printf '%s\n' "$DEPLOY_CHECK" | grep -E '^\?: \((security|caches|database)\.' | sed 's/^/    /' || true
+SECURITY_ISSUES="$(printf '%s\n' "$DEPLOY_CHECK" | grep -cE '^\?: \(security\.' || true)"
+if [[ "${SECURITY_ISSUES:-0}" -eq 0 ]]; then
+    ok "Controle de securite Django : aucun probleme"
+else
+    warn "${SECURITY_ISSUES} avertissement(s) de securite ci-dessus"
+fi
 
 if [[ "$CREATE_ADMIN" == true ]]; then
-    ADMIN_PHONE="$ADMIN_PHONE" ADMIN_EMAIL="$ADMIN_EMAIL" ADMIN_FIRST="$ADMIN_FIRST" \
-    ADMIN_LAST="$ADMIN_LAST" ADMIN_PASSWORD="$ADMIN_PASSWORD" \
-    manage shell -c '
+    # `sudo` purge l'environnement : les valeurs doivent etre passees a `env`
+    # A L'INTERIEUR de l'appel, jamais en prefixe de la fonction.
+    ADMIN_SCRIPT='
 import os
 from core.models import User
 phone = os.environ["ADMIN_PHONE"]
 user = User.objects.filter(phone=phone).first()
 if user:
-    user.role = User.Role.ADMIN; user.is_staff = True; user.is_superuser = True
+    user.role = User.Role.ADMIN
+    user.is_staff = True
+    user.is_superuser = True
     user.email = os.environ["ADMIN_EMAIL"]
-    user.first_name = os.environ["ADMIN_FIRST"]; user.last_name = os.environ["ADMIN_LAST"]
-    user.set_password(os.environ["ADMIN_PASSWORD"]); user.save()
-    print("Compte administrateur mis a jour :", phone)
+    user.first_name = os.environ["ADMIN_FIRST"]
+    user.last_name = os.environ["ADMIN_LAST"]
+    user.set_password(os.environ["ADMIN_PASSWORD"])
+    user.save()
+    print("Compte administrateur mis a jour : " + phone)
 else:
     User.objects.create_superuser(
-        phone=phone, email=os.environ["ADMIN_EMAIL"], password=os.environ["ADMIN_PASSWORD"],
-        first_name=os.environ["ADMIN_FIRST"], last_name=os.environ["ADMIN_LAST"],
+        phone=phone,
+        email=os.environ["ADMIN_EMAIL"],
+        password=os.environ["ADMIN_PASSWORD"],
+        first_name=os.environ["ADMIN_FIRST"],
+        last_name=os.environ["ADMIN_LAST"],
     )
-    print("Compte administrateur cree :", phone)
-' | sed 's/^/    /'
-    ok "Compte administrateur pret"
+    print("Compte administrateur cree : " + phone)
+'
+    if ADMIN_OUTPUT="$(run_as_app env \
+            DJANGO_SETTINGS_MODULE=config.settings_prod \
+            ADMIN_PHONE="$ADMIN_PHONE" \
+            ADMIN_EMAIL="$ADMIN_EMAIL" \
+            ADMIN_FIRST="$ADMIN_FIRST" \
+            ADMIN_LAST="$ADMIN_LAST" \
+            ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+            "${VENV}/bin/python" "${BACKEND_DIR}/manage.py" shell -c "$ADMIN_SCRIPT" 2>&1)"; then
+        printf '%s\n' "$ADMIN_OUTPUT" | grep -v "objects imported automatically" | sed 's/^/    /' || true
+        ok "Compte administrateur pret"
+    else
+        # Etape de confort : son echec ne doit pas interrompre le deploiement.
+        printf '%s\n' "$ADMIN_OUTPUT" | tail -6 | sed 's/^/    /'
+        warn "Creation du compte administrateur impossible. Le deploiement continue."
+        warn "Vous pourrez le creer ensuite avec :"
+        warn "  sudo -u ${APP_USER} DJANGO_SETTINGS_MODULE=config.settings_prod \\"
+        warn "    ${VENV}/bin/python ${BACKEND_DIR}/manage.py createsuperuser"
+    fi
 fi
 
 if [[ "$SEED_DEMO" == true ]]; then
-    manage seed_demo | sed 's/^/    /'
-    ok "Donnees de demonstration chargees"
+    if SEED_OUTPUT="$(manage seed_demo 2>&1)"; then
+        printf '%s\n' "$SEED_OUTPUT" | sed 's/^/    /'
+        ok "Donnees de demonstration chargees"
+    else
+        printf '%s\n' "$SEED_OUTPUT" | tail -6 | sed 's/^/    /'
+        warn "Chargement des donnees de demonstration impossible. Le deploiement continue."
+    fi
 fi
 
 # ---------------------------------------------------------------- systemd
