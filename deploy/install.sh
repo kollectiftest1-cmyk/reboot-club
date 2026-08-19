@@ -96,18 +96,20 @@ ask APP_SLUG        "Nom technique de l'application (lettres, chiffres, tirets)"
 [[ "$APP_SLUG" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || die "Nom technique invalide : minuscules, chiffres et tirets, 2 a 31 caracteres."
 
 APP_USER="$APP_SLUG"
-APP_DIR="/opt/${APP_SLUG}"
 DATA_DIR="/var/lib/${APP_SLUG}"
 LOG_DIR="/var/log/${APP_SLUG}"
 CONF_DIR="/etc/${APP_SLUG}"
 SERVICE="${APP_SLUG}.service"
 NGINX_SITE="/etc/nginx/sites-available/${APP_SLUG}.conf"
 
-# On refuse d'ecraser une installation ou une application homonyme.
-if [[ -e "$APP_DIR" || -e "$NGINX_SITE" ]] && [[ ! -f "${CONF_DIR}/deploy.conf" ]]; then
-    die "Un dossier ou un site Nginx nomme '${APP_SLUG}' existe deja mais n'a pas ete cree par ce script. Choisissez un autre nom technique pour ne rien casser."
+# Reprise possible d'une installation precedente ou interrompue.
+if [[ -f "${CONF_DIR}/deploy.conf" ]]; then
+    warn "Installation existante detectee : elle sera mise a jour en place."
+elif [[ -e "$NGINX_SITE" ]]; then
+    # Seul cas reellement dangereux : un site Nginx homonyme appartenant a une
+    # autre application. On refuse pour ne pas la casser.
+    die "Un site Nginx nomme '${APP_SLUG}.conf' existe deja et n'a pas ete cree par ce script. Choisissez un autre nom technique."
 fi
-[[ -f "${CONF_DIR}/deploy.conf" ]] && warn "Installation existante detectee : elle sera mise a jour en place."
 
 step "Serveur et domaine"
 DEFAULT_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
@@ -128,16 +130,55 @@ if confirm "Activer HTTPS automatiquement avec Let's Encrypt (recommande)" "o"; 
     ask LETSENCRYPT_EMAIL "Adresse e-mail pour les alertes de certificat"
 fi
 
-step "Depot GitHub"
-ask GIT_URL         "URL HTTPS du depot (ex. https://github.com/compte/reboot-club.git)"
+step "Code source"
+ask APP_DIR "Dossier du code sur le serveur" "/opt/${APP_SLUG}"
+[[ "$APP_DIR" = /* ]] || die "Indiquez un chemin absolu."
+
+# Un depot deja clone est reutilise tel quel : on lit son origine et sa branche
+# pour les proposer par defaut.
+EXISTING_REPO=false
+DETECTED_URL=""; DETECTED_BRANCH="main"
+if [[ -d "${APP_DIR}/.git" ]]; then
+    EXISTING_REPO=true
+    DETECTED_URL="$(git -C "$APP_DIR" remote get-url origin 2>/dev/null || true)"
+    DETECTED_BRANCH="$(git -C "$APP_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    # Un depot sans aucun commit renvoie "HEAD" : sans interet comme defaut.
+    [[ -z "$DETECTED_BRANCH" || "$DETECTED_BRANCH" == "HEAD" ]] && DETECTED_BRANCH="main"
+    # Une URL contenant deja un jeton ne doit pas etre reaffichee en clair.
+    [[ "$DETECTED_URL" == *"@"* ]] && DETECTED_URL="$(printf '%s' "$DETECTED_URL" | sed -E 's#https://[^@]*@#https://#')"
+    ok "Depot Git deja present : ${DETECTED_URL:-origine inconnue} (branche ${DETECTED_BRANCH})"
+elif [[ -d "$APP_DIR" ]]; then
+    LEFTOVER="$(find "$APP_DIR" -mindepth 1 -maxdepth 1 \
+        ! -name '.bashrc' ! -name '.profile' ! -name '.bash_logout' \
+        ! -name '.bash_history' ! -name '.cache' ! -name '.local' \
+        ! -name '.gitconfig' ! -name '.git-credentials' 2>/dev/null | wc -l)"
+    if [[ "${LEFTOVER:-0}" -eq 0 ]]; then
+        info "Dossier ${APP_DIR} present mais vide : le code y sera recupere"
+    else
+        warn "Le dossier ${APP_DIR} contient des fichiers sans depot Git."
+        confirm "Y initialiser le depot et y synchroniser le code" "n" \
+            || die "Installation annulee. Indiquez un autre dossier."
+    fi
+fi
+
+ask GIT_URL "URL HTTPS du depot" "${DETECTED_URL}"
 [[ "$GIT_URL" =~ ^https://github\.com/.+ ]] || die "Utilisez une URL HTTPS github.com (pas SSH)."
-ask GIT_BRANCH      "Branche a deployer" "main"
+ask GIT_BRANCH "Branche a deployer" "${DETECTED_BRANCH}"
 GIT_TOKEN=""
 if confirm "Le depot est-il prive (jeton d'acces personnel requis)" "o"; then
     ask_optional_secret GIT_TOKEN "Jeton d'acces GitHub (ghp_... — saisie masquee)"
     [[ -n "$GIT_TOKEN" ]] || die "Un jeton est necessaire pour un depot prive."
 fi
-ask BACKEND_SUBDIR  "Sous-dossier du backend dans le depot" "backend"
+ask BACKEND_SUBDIR "Sous-dossier du backend dans le depot" "backend"
+
+SYNC_CODE=true
+if [[ "$EXISTING_REPO" == true ]]; then
+    warn "La synchronisation execute 'git reset --hard' : toute modification locale non commitee sera perdue."
+    confirm "Synchroniser ${APP_DIR} sur origin/${GIT_BRANCH} maintenant" "o" || SYNC_CODE=false
+    if [[ "$SYNC_CODE" == false && ! -f "${APP_DIR}/${BACKEND_SUBDIR}/manage.py" ]]; then
+        die "manage.py introuvable dans ${APP_DIR}/${BACKEND_SUBDIR}. Verifiez le sous-dossier du backend."
+    fi
+fi
 
 step "Base de donnees PostgreSQL"
 ask DB_NAME         "Nom de la base" "${APP_SLUG//-/_}"
@@ -169,12 +210,13 @@ cat <<RESUME
 
 ${BOLD}Recapitulatif${RESET}
   Application ........ ${APP_SLUG}
-  Dossier ............ ${APP_DIR}   (code)
+  Dossier du code .... ${APP_DIR} $([[ "$EXISTING_REPO" == true ]] && echo "(depot existant reutilise)" || echo "(recupere depuis GitHub)")
                        ${DATA_DIR}  (media, fichiers statiques, sauvegardes)
   Utilisateur systeme  ${APP_USER}
   Domaine ............ ${DOMAIN}  (IP ${SERVER_IP})
   HTTPS .............. $([[ "$USE_HTTPS" == true ]] && echo "oui, Let's Encrypt" || echo "non — HTTP seulement")
   Depot .............. ${GIT_URL} (branche ${GIT_BRANCH})
+  Synchronisation .... $([[ "$SYNC_CODE" == true ]] && echo "oui, git reset --hard sur origin/${GIT_BRANCH}" || echo "non, code laisse en l'etat")
   Jeton GitHub ....... $([[ -n "$GIT_TOKEN" ]] && echo "fourni, stocke en 0600" || echo "aucun (depot public)")
   Base de donnees .... ${DB_NAME} / ${DB_USER}
   Service systemd .... ${SERVICE}
@@ -199,9 +241,14 @@ fi
 if ((${#NEEDED[@]})); then
     info "A installer : ${NEEDED[*]}"
     export DEBIAN_FRONTEND=noninteractive
+    # needrestart est neutralise : sur un serveur partage il proposerait de
+    # redemarrer docker.service, ssh ou dbus, ce qui couperait les autres
+    # applications. Les redemarrages restent a votre main.
+    export NEEDRESTART_SUSPEND=1
+    export NEEDRESTART_MODE=l
     apt-get update -qq
     apt-get install -y -qq "${NEEDED[@]}"
-    ok "Paquets installes"
+    ok "Paquets installes (aucun service tiers redemarre)"
 else
     ok "Tous les paquets requis sont deja presents"
 fi
@@ -210,11 +257,22 @@ systemctl enable --now nginx >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------- utilisateur
 step "Utilisateur systeme et arborescence"
+mkdir -p "$DATA_DIR"
+# Le dossier personnel du compte est DATA_DIR et non APP_DIR : sinon adduser y
+# depose ses fichiers de squelette et le clonage du depot devient impossible.
 if ! id -u "$APP_USER" >/dev/null 2>&1; then
-    adduser --system --group --home "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"
+    adduser --system --group --home "$DATA_DIR" --shell /usr/sbin/nologin "$APP_USER"
     ok "Utilisateur systeme ${APP_USER} cree (sans shell de connexion)"
 else
-    ok "Utilisateur systeme ${APP_USER} deja present"
+    CURRENT_HOME="$(getent passwd "$APP_USER" | cut -d: -f6)"
+    if [[ "$CURRENT_HOME" != "$DATA_DIR" ]]; then
+        usermod -d "$DATA_DIR" "$APP_USER"
+        # Fichiers de squelette laisses par une execution precedente.
+        rm -f "${APP_DIR}/.bashrc" "${APP_DIR}/.profile" "${APP_DIR}/.bash_logout" 2>/dev/null || true
+        ok "Utilisateur ${APP_USER} deja present : dossier personnel corrige vers ${DATA_DIR}"
+    else
+        ok "Utilisateur systeme ${APP_USER} deja present"
+    fi
 fi
 mkdir -p "$APP_DIR" "$DATA_DIR/media" "$DATA_DIR/staticfiles" "$DATA_DIR/backups" "$LOG_DIR" "$CONF_DIR"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR" "$DATA_DIR" "$LOG_DIR"
@@ -245,7 +303,7 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 -qtAX -d "$DB_NAME" \
 ok "Droits accordes a ${DB_USER}"
 
 # ---------------------------------------------------------------- depot git
-step "Recuperation du code source"
+step "Preparation du code source"
 if [[ -n "$GIT_TOKEN" ]]; then
     # Le jeton n'est jamais inscrit dans l'URL du remote : il vit dans un
     # fichier d'identifiants lisible par le seul utilisateur de l'application.
@@ -258,7 +316,11 @@ if [[ -n "$GIT_TOKEN" ]]; then
     ok "Jeton GitHub enregistre dans ${CONF_DIR}/git-credentials (0600)"
 fi
 
-run_as_app() { sudo -u "$APP_USER" -H env HOME="$APP_DIR" "$@"; }
+run_as_app() { sudo -u "$APP_USER" -H env HOME="$DATA_DIR" "$@"; }
+
+mkdir -p "$APP_DIR"
+chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+ok "Dossier ${APP_DIR} attribue a ${APP_USER}"
 
 git config --system --add safe.directory "$APP_DIR" 2>/dev/null || true
 if [[ -n "$GIT_TOKEN" ]]; then
@@ -266,20 +328,33 @@ if [[ -n "$GIT_TOKEN" ]]; then
 fi
 run_as_app git config --global --add safe.directory "$APP_DIR"
 
-if [[ -d "${APP_DIR}/.git" ]]; then
+# Depot initialise SUR PLACE plutot que clone : `git clone` refuse un dossier
+# non vide, ce qui empeche de reutiliser un code deja present.
+if [[ ! -d "${APP_DIR}/.git" ]]; then
+    run_as_app git init -q "$APP_DIR"
+    ok "Depot initialise dans ${APP_DIR}"
+fi
+if run_as_app git -C "$APP_DIR" remote get-url origin >/dev/null 2>&1; then
     run_as_app git -C "$APP_DIR" remote set-url origin "$GIT_URL"
-    run_as_app git -C "$APP_DIR" fetch --prune origin
+else
+    run_as_app git -C "$APP_DIR" remote add origin "$GIT_URL"
+fi
+
+if [[ "$SYNC_CODE" == true ]]; then
+    run_as_app git -C "$APP_DIR" fetch --prune origin \
+        || die "Recuperation du depot impossible. Verifiez l'URL, la branche et le jeton d'acces GitHub."
+    run_as_app git -C "$APP_DIR" rev-parse --verify --quiet "origin/${GIT_BRANCH}" >/dev/null \
+        || die "La branche '${GIT_BRANCH}' n'existe pas sur ${GIT_URL}."
     run_as_app git -C "$APP_DIR" checkout -B "$GIT_BRANCH" "origin/${GIT_BRANCH}"
     run_as_app git -C "$APP_DIR" reset --hard "origin/${GIT_BRANCH}"
-    ok "Depot existant mis a jour sur ${GIT_BRANCH}"
+    ok "Code synchronise sur la branche ${GIT_BRANCH}"
 else
-    run_as_app git clone --branch "$GIT_BRANCH" "$GIT_URL" "$APP_DIR"
-    ok "Depot clone sur ${GIT_BRANCH}"
+    ok "Code laisse en l'etat, aucune synchronisation demandee"
 fi
 
 BACKEND_DIR="${APP_DIR}/${BACKEND_SUBDIR}"
 [[ -f "${BACKEND_DIR}/manage.py" ]] || die "manage.py introuvable dans ${BACKEND_DIR}. Verifiez le sous-dossier du backend."
-COMMIT="$(run_as_app git -C "$APP_DIR" rev-parse --short HEAD)"
+COMMIT="$(run_as_app git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || echo "inconnu")"
 ok "Version deployee : ${COMMIT}"
 
 # ---------------------------------------------------------------- python

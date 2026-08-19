@@ -58,7 +58,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-run_as_app() { sudo -u "$APP_USER" -H env HOME="$APP_DIR" "$@"; }
+run_as_app() { sudo -u "$APP_USER" -H env HOME="$DATA_DIR" "$@"; }
 manage() { run_as_app env DJANGO_SETTINGS_MODULE=config.settings_prod \
     "${VENV}/bin/python" "${BACKEND_DIR}/manage.py" "$@"; }
 
