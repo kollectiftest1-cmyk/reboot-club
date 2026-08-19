@@ -28,12 +28,43 @@
       "favicon": "./assets/icon.png"
     },
     "plugins": [
-      ["expo-secure-store", {"configureAndroidBackup": true, "faceIDPermission": "Autoriser REBOOT CLUB à utiliser Face ID."}],
-      ["expo-navigation-bar", {"backgroundColor": "#F4F7F5", "barStyle": "dark", "visibility": "visible", "position": "relative"}],
-      ["expo-image-picker", {"photosPermission": "Autoriser REBOOT CLUB a joindre vos pieces KYC.", "cameraPermission": "Autoriser REBOOT CLUB a prendre votre selfie KYC.", "microphonePermission": false}]
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true,
+          "faceIDPermission": "Autoriser REBOOT CLUB à utiliser Face ID."
+        }
+      ],
+      [
+        "expo-navigation-bar",
+        {
+          "backgroundColor": "#F4F7F5",
+          "barStyle": "dark",
+          "visibility": "visible",
+          "position": "relative"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Autoriser REBOOT CLUB a joindre vos pieces KYC.",
+          "cameraPermission": "Autoriser REBOOT CLUB a prendre votre selfie KYC.",
+          "microphonePermission": false
+        }
+      ]
     ],
     "extra": {
-      "apiUrl": "http://10.0.2.2:8000/api/v1"
-    }
+      "apiUrl": "http://10.0.2.2:8000/api/v1",
+      "expo-navigation-bar": {
+        "backgroundColor": "#F4F7F5",
+        "barStyle": "dark",
+        "visibility": "visible",
+        "position": "relative"
+      },
+      "eas": {
+        "projectId": "28ead10c-6e6d-4d6c-8ceb-8e9aca8b2e3f"
+      }
+    },
+    "owner": "dash_dev"
   }
 }

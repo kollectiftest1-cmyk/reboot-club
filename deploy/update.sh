@@ -188,6 +188,11 @@ fi
 
 step "Fichiers statiques"
 manage collectstatic --noinput >/dev/null
+# Les fichiers fraichement collectes doivent rester lisibles par Nginx.
+NGINX_USER="$(awk '$1=="user" {gsub(/;/,"",$2); print $2; exit}' /etc/nginx/nginx.conf 2>/dev/null || true)"
+NGINX_GROUP="$(id -gn "${NGINX_USER:-www-data}" 2>/dev/null || echo www-data)"
+chown -R "$APP_USER:$NGINX_GROUP" "${DATA_DIR}/staticfiles"
+chmod -R g+rX "${DATA_DIR}/staticfiles"
 ok "Fichiers statiques collectes"
 
 step "Redemarrage du service"

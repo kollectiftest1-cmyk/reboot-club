@@ -276,9 +276,28 @@ else
 fi
 mkdir -p "$APP_DIR" "$DATA_DIR/media" "$DATA_DIR/staticfiles" "$DATA_DIR/backups" "$LOG_DIR" "$CONF_DIR"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR" "$DATA_DIR" "$LOG_DIR"
-chmod 750 "$APP_DIR" "$DATA_DIR" "$LOG_DIR"
+chmod 750 "$APP_DIR" "$LOG_DIR"
 chmod 700 "$CONF_DIR"
-ok "Arborescence prete"
+
+# Nginx sert lui-meme /static/ et /media/ : il lui faut le droit de traverser
+# DATA_DIR et de lire ces deux dossiers, sans pour autant acceder au reste.
+NGINX_USER="$(awk '$1=="user" {gsub(/;/,"",$2); print $2; exit}' /etc/nginx/nginx.conf 2>/dev/null || true)"
+NGINX_USER="${NGINX_USER:-www-data}"
+NGINX_GROUP="$(id -gn "$NGINX_USER" 2>/dev/null || echo "$NGINX_USER")"
+
+share_with_nginx() {
+    chown "$APP_USER:$NGINX_GROUP" "$DATA_DIR"
+    chmod 750 "$DATA_DIR"                       # traversee par le groupe, rien pour les autres
+    chown -R "$APP_USER:$NGINX_GROUP" "$DATA_DIR/staticfiles" "$DATA_DIR/media"
+    # setgid : les fichiers televerses plus tard restent lisibles par Nginx.
+    chmod 2750 "$DATA_DIR/staticfiles" "$DATA_DIR/media"
+    chmod -R g+rX "$DATA_DIR/staticfiles" "$DATA_DIR/media"
+    # Les sauvegardes de base restent strictement privees.
+    chown -R "$APP_USER:$APP_USER" "$DATA_DIR/backups"
+    chmod 700 "$DATA_DIR/backups"
+}
+share_with_nginx
+ok "Arborescence prete (fichiers servis lisibles par ${NGINX_USER})"
 
 # ---------------------------------------------------------------- postgres
 step "Base de donnees PostgreSQL"
@@ -429,7 +448,7 @@ if [[ -d "${BACKEND_DIR}/media" && ! -L "${BACKEND_DIR}/media" ]]; then
         ok "Fichiers media du depot recopies vers ${DATA_DIR}/media"
     fi
 fi
-chown -R "$APP_USER:$APP_USER" "$DATA_DIR"
+share_with_nginx
 
 manage() { run_as_app env DJANGO_SETTINGS_MODULE=config.settings_prod \
     "${VENV}/bin/python" "${BACKEND_DIR}/manage.py" "$@"; }
@@ -438,6 +457,7 @@ step "Base de donnees : migrations et fichiers statiques"
 manage migrate --noinput
 ok "Migrations appliquees"
 manage collectstatic --noinput --clear >/dev/null
+share_with_nginx
 ok "Fichiers statiques collectes dans ${DATA_DIR}/staticfiles"
 # Les avertissements drf_spectacular concernent la documentation OpenAPI et non
 # la securite : on ne remonte que ce qui compte en production.
@@ -698,6 +718,15 @@ fi
 
 # ---------------------------------------------------------------- controle
 step "Controle de sante"
+STATIC_PROBE="$(find "${DATA_DIR}/staticfiles" -type f -name '*.css' 2>/dev/null | head -1)"
+if [[ -n "$STATIC_PROBE" ]]; then
+    if sudo -u "$NGINX_USER" test -r "$STATIC_PROBE" 2>/dev/null; then
+        ok "Nginx peut lire les fichiers statiques (admin Django correctement style)"
+    else
+        warn "Nginx ne peut pas lire ${STATIC_PROBE} : l'admin Django s'affichera sans CSS."
+        warn "Corrigez avec : chown -R ${APP_USER}:${NGINX_GROUP} ${DATA_DIR}/staticfiles && chmod -R g+rX ${DATA_DIR}/staticfiles"
+    fi
+fi
 SCHEME="http"; [[ "${USE_HTTPS_OK:-false}" == true ]] && SCHEME="https"
 sleep 2
 if curl -fsS --max-time 15 "${SCHEME}://${DOMAIN}/api/v1/health/" >/dev/null 2>&1; then
