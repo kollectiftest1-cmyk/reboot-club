@@ -4,12 +4,18 @@ from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import AuditLog, Club, ClubMessage, Deposit, Dispute, EconomicActivity, Installment, Invitation, KYCApplication, Loan, LoanFunding, Membership, Notification, OTPChallenge, PlatformSettings, Repayment, User, Withdrawal
-from .services import add_months, borrower_credit_score, club_finances, money
+from .models import (
+    LOAN_DURATIONS, REPAYMENT_FREQUENCIES, duration_in_months,
+    AuditLog, Club, ClubMessage, Deposit, Dispute, EconomicActivity, Installment, Invitation, KYCApplication,
+    Loan, LoanBorrower, LoanFunding, LoanPurpose, Membership, Notification, OTPChallenge, PlatformSettings,
+    Repayment, User, Withdrawal, allowed_frequencies, installment_count,
+)
+from .services import add_months, borrower_credit_score, club_finances, loan_cost_breakdown, money
 
 
 class UserSerializer(serializers.ModelSerializer):
     name = serializers.CharField(source="display_name", read_only=True)
+    public_name = serializers.CharField(read_only=True)
     current_profile = serializers.CharField(read_only=True)
     available_profiles = serializers.ListField(child=serializers.CharField(), read_only=True)
     kyc_verified = serializers.BooleanField(source="has_valid_kyc", read_only=True)
@@ -19,7 +25,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["id", "email", "phone", "first_name", "last_name", "name", "role", "current_profile", "available_profiles", "profile_requests", "lender_profile_status", "kyc_verified", "kyc_status", "avatar", "identity_document", "selfie", "admin_borrower_rating", "credit_score", "is_active"]
+        fields = ["id", "email", "phone", "first_name", "last_name", "name", "public_name", "role", "current_profile", "available_profiles", "profile_requests", "lender_profile_status", "anonymous_lender", "kyc_verified", "kyc_status", "avatar", "identity_document", "selfie", "admin_borrower_rating", "credit_score", "is_active"]
         read_only_fields = ["role", "kyc_verified"]
 
     def get_credit_score(self, obj):
@@ -139,10 +145,6 @@ class ManagedUserSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"club": "Vous devez choisir un club que vous dirigez."})
             if attrs.get("role") not in [User.Role.LENDER, User.Role.BORROWER]:
                 raise serializers.ValidationError({"role": "Un chef peut creer uniquement des preteurs et emprunteurs."})
-        if attrs.get("role") == User.Role.BORROWER and not attrs.get("club"):
-            raise serializers.ValidationError({"club": "Un profil emprunteur doit obligatoirement etre relie a un club."})
-        if attrs.get("role") == User.Role.LENDER and attrs.get("club"):
-            raise serializers.ValidationError({"club": "Un profil preteur global ne peut pas etre associe a un club."})
         return attrs
 
     def create(self, validated_data):
@@ -216,12 +218,15 @@ class ClubSerializer(serializers.ModelSerializer):
     leader_selfie = serializers.ImageField(source="leader.selfie", read_only=True)
     member_count = serializers.SerializerMethodField()
     finances = serializers.SerializerMethodField()
+    borrower_charge_rate = serializers.DecimalField(max_digits=6, decimal_places=2, read_only=True)
+    duration_options = serializers.SerializerMethodField()
 
     class Meta:
         model = Club
         fields = [
             "id", "name", "description", "zone", "currency", "leader", "leader_name", "leader_avatar", "leader_selfie", "status",
-            "interest_rate", "penalty_rate", "platform_fee_rate", "min_loan", "max_loan",
+            "interest_rate", "penalty_rate", "platform_fee_rate", "leader_commission_rate", "borrower_charge_rate",
+            "min_loan", "max_loan", "allowed_durations", "duration_options", "max_collective_borrowers",
             "min_duration_months", "max_duration_months", "withdrawal_notice_days",
             "member_count", "finances", "created_at",
         ]
@@ -247,6 +252,43 @@ class ClubSerializer(serializers.ModelSerializer):
     def get_finances(self, obj) -> dict[str, str]:
         return {key: str(value) for key, value in club_finances(obj).items()}
 
+    def get_duration_options(self, obj) -> list:
+        return [{
+            "code": code,
+            "label": LOAN_DURATIONS[code]["label"],
+            "frequencies": [{
+                "code": frequency,
+                "label": REPAYMENT_FREQUENCIES[frequency]["label"],
+                "installments": installment_count(code, frequency),
+            } for frequency in allowed_frequencies(code)],
+        } for code in obj.duration_options]
+
+    def validate_allowed_durations(self, value):
+        codes = [code for code in (value or []) if code in LOAN_DURATIONS]
+        if not codes:
+            raise serializers.ValidationError("Selectionnez au moins une duree autorisee.")
+        return codes
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user and getattr(user, "is_authenticated", False) and not (user.is_superuser or user.role == User.Role.ADMIN):
+            # Le chef de club ne voit ni la commission de l'application ni l'interet du preteur.
+            if user.current_profile == User.Role.LEADER:
+                data["platform_fee_rate"] = None
+                data["interest_rate"] = None
+                finances = data.get("finances") or {}
+                for key in ["deposited", "available", "withdrawn"]:
+                    finances.pop(key, None)
+                data["finances"] = finances
+            elif user.current_profile == User.Role.BORROWER:
+                data["platform_fee_rate"] = None
+                data["interest_rate"] = None
+                data["leader_commission_rate"] = None
+                data["finances"] = {}
+        return data
+
 
 class MembershipSerializer(serializers.ModelSerializer):
     user_detail = UserSerializer(source="user", read_only=True)
@@ -258,17 +300,13 @@ class MembershipSerializer(serializers.ModelSerializer):
         read_only_fields = ["status", "decision_reason", "invited_by", "accepted_at", "member_approved_at", "leader_approved_at", "reviewed_at"]
         validators = []
 
-    def validate_role(self, value):
-        if value == Membership.Role.LENDER:
-            raise serializers.ValidationError("Un profil preteur est global et ne peut pas etre associe a un club.")
-        return value
-
 
 class DepositSerializer(serializers.ModelSerializer):
+    club = serializers.PrimaryKeyRelatedField(queryset=Club.objects.all(), required=False, allow_null=True)
     lender_name = serializers.CharField(source="lender.display_name", read_only=True)
     lender_avatar = serializers.ImageField(source="lender.avatar", read_only=True)
     lender_selfie = serializers.ImageField(source="lender.selfie", read_only=True)
-    club_name = serializers.CharField(source="club.name", read_only=True)
+    club_name = serializers.CharField(source="club.name", read_only=True, default="Portefeuille global")
 
     class Meta:
         model = Deposit
@@ -281,12 +319,13 @@ class DepositSerializer(serializers.ModelSerializer):
 
 class InstallmentSerializer(serializers.ModelSerializer):
     total_due = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    charge_due = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
     remaining_due = serializers.SerializerMethodField()
     progress_percent = serializers.SerializerMethodField()
 
     class Meta:
         model = Installment
-        fields = ["id", "number", "due_date", "principal_due", "interest_due", "fee_due", "penalty_due", "total_due", "paid_amount", "remaining_due", "progress_percent", "status"]
+        fields = ["id", "number", "due_date", "principal_due", "interest_due", "fee_due", "leader_commission_due", "charge_due", "penalty_due", "total_due", "paid_amount", "remaining_due", "progress_percent", "status"]
 
     def get_remaining_due(self, obj):
         return max(obj.total_due - obj.paid_amount, Decimal("0"))
@@ -297,12 +336,47 @@ class InstallmentSerializer(serializers.ModelSerializer):
         return min(100, round(obj.paid_amount / obj.total_due * 100))
 
 
+class LoanPurposeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LoanPurpose
+        fields = ["id", "name", "description", "is_active", "position", "created_at"]
+        read_only_fields = ["created_at"]
+
+    def validate_name(self, value):
+        name = value.strip()
+        queryset = LoanPurpose.objects.filter(name__iexact=name)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Cet objet de pret existe deja.")
+        return name
+
+
 class LoanFundingSerializer(serializers.ModelSerializer):
-    lender_name = serializers.CharField(source="lender.display_name", read_only=True)
+    lender_name = serializers.CharField(source="lender.public_name", read_only=True)
+    review_status = serializers.CharField(read_only=True)
+    loan_reference = serializers.CharField(source="loan.reference", read_only=True)
+    club_name = serializers.CharField(source="loan.club.name", read_only=True)
+    currency = serializers.CharField(source="loan.currency", read_only=True)
 
     class Meta:
         model = LoanFunding
-        fields = ["lender", "lender_name", "amount", "expected_gain", "principal_repaid", "interest_earned"]
+        fields = [
+            "id", "loan", "loan_reference", "club_name", "currency", "lender", "lender_name", "amount",
+            "pending_amount", "review_status", "submitted_at", "reviewed_at", "decision_reason",
+            "expected_gain", "principal_repaid", "interest_earned", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class LoanBorrowerSerializer(serializers.ModelSerializer):
+    user_detail = UserSerializer(source="user", read_only=True)
+    name = serializers.CharField(source="user.display_name", read_only=True)
+
+    class Meta:
+        model = LoanBorrower
+        fields = ["id", "user", "name", "user_detail", "share_amount", "is_primary", "status", "responded_at", "decision_reason", "principal_repaid", "total_paid"]
+        read_only_fields = fields
 
 
 class LoanSerializer(serializers.ModelSerializer):
@@ -313,10 +387,24 @@ class LoanSerializer(serializers.ModelSerializer):
     balance = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
     installments = InstallmentSerializer(many=True, read_only=True)
     fundings = LoanFundingSerializer(many=True, read_only=True)
+    borrowers = LoanBorrowerSerializer(many=True, read_only=True)
     funded_amount = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
     funding_remaining = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    funding_open_amount = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    pending_funding_amount = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    charge_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    charge_rate = serializers.DecimalField(max_digits=6, decimal_places=2, read_only=True)
+    duration_label = serializers.CharField(read_only=True)
+    frequency_label = serializers.CharField(read_only=True)
+    collection_agent_name = serializers.CharField(source="collection_agent.display_name", read_only=True)
+    purpose = serializers.CharField(max_length=240, required=False, allow_blank=True)
+    purpose_id = serializers.PrimaryKeyRelatedField(source="purpose_reference", queryset=LoanPurpose.objects.filter(is_active=True), write_only=True, required=False, allow_null=True)
+    partners = serializers.ListField(child=serializers.IntegerField(), write_only=True, required=False)
+    shares = serializers.DictField(child=serializers.DecimalField(max_digits=16, decimal_places=2), write_only=True, required=False)
     can_fund = serializers.SerializerMethodField()
+    can_collect = serializers.SerializerMethodField()
     my_funding = serializers.SerializerMethodField()
+    my_share = serializers.SerializerMethodField()
     my_available_capital = serializers.SerializerMethodField()
     repayments = serializers.SerializerMethodField()
     borrower_credit_score = serializers.SerializerMethodField()
@@ -325,17 +413,28 @@ class LoanSerializer(serializers.ModelSerializer):
     class Meta:
         model = Loan
         fields = [
-            "id", "reference", "club", "club_name", "borrower", "borrower_name", "borrower_avatar", "borrower_selfie", "purpose", "estimated_income",
-            "guarantors", "amount", "currency", "duration_months", "interest_rate", "fee_rate", "interest_total",
-            "fee_total", "total_due", "total_paid", "balance", "status", "decision_reason", "approved_at",
-            "disbursed_at", "funding_completed_at", "scheduled_disbursement_date", "funded_amount", "funding_remaining", "can_fund", "my_funding", "my_available_capital", "borrower_credit_score", "borrower_admin_rating", "installments", "fundings", "repayments", "created_at",
+            "id", "reference", "club", "club_name", "borrower", "borrower_name", "borrower_avatar", "borrower_selfie",
+            "purpose", "purpose_reference", "purpose_id", "estimated_income", "guarantors", "amount", "currency",
+            "duration_code", "duration_label", "repayment_frequency", "frequency_label", "installment_total",
+            "duration_months", "is_collective", "partners", "shares", "borrowers", "my_share",
+            "collection_agent", "collection_agent_name", "can_collect",
+            "interest_rate", "fee_rate", "leader_commission_rate", "charge_rate",
+            "interest_total", "fee_total", "leader_commission_total", "charge_total",
+            "total_due", "total_paid", "balance", "status", "decision_reason", "approved_at",
+            "disbursed_at", "funding_completed_at", "scheduled_disbursement_date", "funded_amount",
+            "funding_remaining", "funding_open_amount", "pending_funding_amount", "can_fund", "my_funding",
+            "my_available_capital", "borrower_credit_score", "borrower_admin_rating", "installments",
+            "fundings", "repayments", "created_at",
         ]
         read_only_fields = [
-            "reference", "borrower", "currency", "interest_rate", "fee_rate", "interest_total", "fee_total",
+            "reference", "borrower", "currency", "interest_rate", "fee_rate", "leader_commission_rate",
+            "interest_total", "fee_total", "leader_commission_total", "installment_total", "duration_months",
+            "is_collective", "collection_agent", "purpose_reference",
             "total_due", "total_paid", "status", "decision_reason", "approved_at", "disbursed_at",
             "funding_completed_at", "scheduled_disbursement_date",
         ]
 
+    # ------------------------------------------------------------------ lecture
     def get_can_fund(self, obj) -> bool:
         request = self.context.get("request")
         if not request or not request.user.is_authenticated:
@@ -343,6 +442,14 @@ class LoanSerializer(serializers.ModelSerializer):
         if request.user.role == User.Role.ADMIN or request.user.is_superuser:
             return True
         return request.user.lender_profile_status == User.LenderProfileStatus.ACTIVE
+
+    def get_can_collect(self, obj) -> bool:
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return False
+        if request.user.role == User.Role.ADMIN or request.user.is_superuser:
+            return True
+        return bool(obj.collection_agent_id and obj.collection_agent_id == request.user.id)
 
     def get_borrower_credit_score(self, obj):
         return borrower_credit_score(obj.borrower)
@@ -356,6 +463,28 @@ class LoanSerializer(serializers.ModelSerializer):
             request._lender_total_available = lender_total_available(request.user)
         return request._lender_total_available
 
+    def get_my_share(self, obj):
+        """Quote-part du co-emprunteur connecte dans un pret collectif."""
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return None
+        row = next((item for item in obj.borrowers.all() if item.user_id == request.user.id), None)
+        if not row:
+            return None
+        ratio = row.share_amount / obj.amount if obj.amount else Decimal("0")
+        share_due = money(obj.total_due * ratio)
+        return {
+            "id": str(row.id),
+            "share_amount": row.share_amount,
+            "share_percent": round(float(ratio) * 100, 2),
+            "status": row.status,
+            "is_primary": row.is_primary,
+            "total_due": share_due,
+            "total_paid": row.total_paid,
+            "balance": max(share_due - row.total_paid, Decimal("0")),
+            "charge_total": money(obj.charge_total * ratio),
+        }
+
     def get_my_funding(self, obj):
         request = self.context.get("request")
         if not request or not request.user.is_authenticated:
@@ -368,9 +497,11 @@ class LoanSerializer(serializers.ModelSerializer):
         received_cursor = received
         schedule = []
         installments = list(obj.installments.all())
+        ratio = funding.amount / obj.amount if obj.amount else Decimal("0")
         for installment in installments:
-            ratio = funding.amount / obj.amount
-            expected = (installment.principal_due + installment.interest_due) * ratio
+            # Le preteur ne voit que SA quote-part de capital et SON interet :
+            # ni la commission de l'application ni celle du chef de club.
+            expected = money((installment.principal_due + installment.interest_due) * ratio)
             received_here = min(received_cursor, expected)
             received_cursor -= received_here
             schedule.append({
@@ -381,23 +512,30 @@ class LoanSerializer(serializers.ModelSerializer):
                 "remaining": max(expected - received_here, Decimal("0")),
                 "status": "paid" if received_here >= expected else installment.status,
             })
-        if not installments and obj.duration_months:
+        if not installments and obj.installment_total:
             start = obj.scheduled_disbursement_date or timezone.localdate()
-            regular_return = money(expected_total / obj.duration_months)
-            return_left = expected_total
-            for number in range(1, obj.duration_months + 1):
-                expected = return_left if number == obj.duration_months else regular_return
-                return_left -= expected
+            from .services import installment_dates
+            try:
+                dates = installment_dates(start, obj.duration_code, obj.repayment_frequency)
+            except Exception:
+                dates = []
+            values = []
+            if dates:
+                regular = money(expected_total / len(dates))
+                left = expected_total
+                for index in range(len(dates)):
+                    value = left if index == len(dates) - 1 else regular
+                    left -= value
+                    values.append(value)
+            for index, due_date in enumerate(dates):
                 schedule.append({
-                    "number": number,
-                    "due_date": add_months(start, number),
-                    "expected": expected,
-                    "received": Decimal("0"),
-                    "remaining": expected,
-                    "status": "upcoming",
+                    "number": index + 1, "due_date": due_date, "expected": values[index],
+                    "received": Decimal("0"), "remaining": values[index], "status": "upcoming",
                 })
         return {
             "amount": funding.amount,
+            "pending_amount": funding.pending_amount,
+            "review_status": funding.review_status,
             "expected_gain": funding.expected_gain,
             "expected_total": expected_total,
             "principal_repaid": funding.principal_repaid,
@@ -411,11 +549,14 @@ class LoanSerializer(serializers.ModelSerializer):
         return [{
             "id": repayment.id,
             "reference": repayment.reference,
+            "payer": str(repayment.payer_id),
+            "payer_name": repayment.payer.display_name,
             "amount": repayment.amount,
             "payment_method": repayment.payment_method,
             "principal_paid": repayment.principal_paid,
             "interest_paid": repayment.interest_paid,
             "fee_paid": repayment.fee_paid,
+            "leader_commission_paid": repayment.leader_commission_paid,
             "penalty_paid": repayment.penalty_paid,
             "created_at": repayment.created_at,
         } for repayment in obj.repayments.all()]
@@ -423,53 +564,119 @@ class LoanSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         request = self.context.get("request")
-        is_borrower = request and request.user.current_profile == User.Role.BORROWER and instance.borrower_id == request.user.id
-        if is_borrower:
-            data.pop("interest_rate", None)
-            data.pop("fee_rate", None)
-            data.pop("interest_total", None)
-            data.pop("fee_total", None)
-            data["installments"] = [
-                {key: value for key, value in item.items() if key not in ["principal_due", "interest_due", "fee_due", "penalty_due"]}
-                for item in data["installments"]
-            ]
-            data["repayments"] = [
-                {key: value for key, value in item.items() if key not in ["principal_paid", "interest_paid", "fee_paid", "penalty_paid"]}
-                for item in data["repayments"]
-            ]
-        if request and request.user.current_profile == User.Role.LENDER and request.user.role != User.Role.ADMIN:
+        user = getattr(request, "user", None)
+        if not user or not getattr(user, "is_authenticated", False):
+            return data
+        is_admin = user.role == User.Role.ADMIN or user.is_superuser
+        if is_admin:
+            return data
+        profile = user.current_profile
+        if profile == User.Role.LENDER:
+            # Le preteur ignore l'identite de l'emprunteur, ne voit que SON placement
+            # et jamais la ventilation des commissions.
             data["borrower_name"] = "Membre du club"
             data["borrower_avatar"] = None
             data["borrower_selfie"] = None
             data["estimated_income"] = None
             data["guarantors"] = ""
-            data["fundings"] = [item for item in data["fundings"] if str(item["lender"]) == str(request.user.id)]
+            data["borrowers"] = []
+            data["fundings"] = [item for item in data["fundings"] if str(item["lender"]) == str(user.id)]
             data["repayments"] = []
             data["borrower_credit_score"] = None
             data["borrower_admin_rating"] = None
+            for field in ["fee_rate", "fee_total", "leader_commission_rate", "leader_commission_total", "charge_rate", "charge_total", "installments"]:
+                data[field] = None if field != "installments" else []
+            data["collection_agent"] = None
+            data["collection_agent_name"] = None
+        elif profile == User.Role.BORROWER:
+            # L'emprunteur ne voit qu'un seul cout global et aucun preteur.
+            for field in ["interest_rate", "fee_rate", "leader_commission_rate", "interest_total", "fee_total", "leader_commission_total"]:
+                data[field] = None
+            data["fundings"] = []
+            data["funded_amount"] = None
+            data["funding_remaining"] = None
+            data["funding_open_amount"] = None
+            data["pending_funding_amount"] = None
+            data["my_funding"] = None
+            for item in data.get("installments") or []:
+                for field in ["interest_due", "fee_due", "leader_commission_due"]:
+                    item[field] = None
+            for item in data.get("repayments") or []:
+                for field in ["interest_paid", "fee_paid", "leader_commission_paid"]:
+                    item[field] = None
+        elif profile == User.Role.LEADER:
+            # Le chef de club ne voit que SA commission.
+            for field in ["interest_rate", "fee_rate", "interest_total", "fee_total"]:
+                data[field] = None
+            data["fundings"] = []
+            data["my_funding"] = None
+            for item in data.get("installments") or []:
+                for field in ["interest_due", "fee_due"]:
+                    item[field] = None
+            for item in data.get("repayments") or []:
+                for field in ["interest_paid", "fee_paid"]:
+                    item[field] = None
         return data
+
+    # ------------------------------------------------------------- validation
     def validate(self, attrs):
         club = attrs["club"]
         amount = attrs["amount"]
-        duration = attrs["duration_months"]
+        duration_code = attrs.get("duration_code") or "3m"
+        frequency = attrs.get("repayment_frequency") or "monthly"
         if not club.min_loan <= amount <= club.max_loan:
             raise serializers.ValidationError({"amount": "Montant hors des limites du club."})
-        if not club.min_duration_months <= duration <= club.max_duration_months:
-            raise serializers.ValidationError({"duration_months": "Duree hors des limites du club."})
+        if duration_code not in club.duration_options:
+            raise serializers.ValidationError({"duration_code": "Cette duree n'est pas proposee par le club."})
+        count = installment_count(duration_code, frequency)
+        if count <= 0:
+            allowed = ", ".join(REPAYMENT_FREQUENCIES[code]["label"] for code in allowed_frequencies(duration_code))
+            raise serializers.ValidationError({"repayment_frequency": f"Frequence incompatible avec la duree choisie. Frequences possibles : {allowed}."})
+        if not attrs.get("purpose_reference") and not (attrs.get("purpose") or "").strip():
+            raise serializers.ValidationError({"purpose_id": "Selectionnez l'objet du pret."})
         request = self.context.get("request")
         if request and not request.user.has_valid_kyc:
             raise serializers.ValidationError({"detail": "Votre KYC doit etre valide avant toute demande d'emprunt."})
+        partners = attrs.get("partners") or []
+        if len(partners) + 1 > club.max_collective_borrowers:
+            raise serializers.ValidationError({"partners": f"Un pret collectif accepte au maximum {club.max_collective_borrowers} emprunteurs."})
+        attrs["installment_total"] = count
         return attrs
 
     def create(self, validated_data):
         request = self.context["request"]
         club = validated_data["club"]
+        partners = validated_data.pop("partners", [])
+        shares = validated_data.pop("shares", {})
         if not Membership.objects.filter(club=club, user=request.user, role=Membership.Role.BORROWER, status=Membership.Status.ACTIVE).exists():
             raise serializers.ValidationError("Vous devez etre un emprunteur actif de ce club.")
-        return Loan.objects.create(
+        purpose_reference = validated_data.get("purpose_reference")
+        if purpose_reference:
+            validated_data["purpose"] = purpose_reference.name
+        partner_users = []
+        if partners:
+            partner_users = list(User.objects.filter(id__in=partners, is_active=True).exclude(pk=request.user.pk))
+            if len(partner_users) != len(set(str(item) for item in partners) - {str(request.user.id)}):
+                raise serializers.ValidationError({"partners": "Un ou plusieurs co-emprunteurs sont introuvables."})
+            for partner in partner_users:
+                if not Membership.objects.filter(club=club, user=partner, role=Membership.Role.BORROWER, status=Membership.Status.ACTIVE).exists():
+                    raise serializers.ValidationError({"partners": f"{partner.display_name} n'est pas emprunteur actif de ce club."})
+                if not partner.has_valid_kyc:
+                    raise serializers.ValidationError({"partners": f"Le KYC de {partner.display_name} n'est pas valide."})
+        loan = Loan.objects.create(
             borrower=request.user, currency=club.currency, interest_rate=club.interest_rate,
-            fee_rate=club.platform_fee_rate, **validated_data,
+            fee_rate=club.platform_fee_rate, leader_commission_rate=club.leader_commission_rate,
+            duration_months=duration_in_months(validated_data.get("duration_code") or "3m"),
+            is_collective=bool(partner_users),
+            status=Loan.Status.PENDING_PARTNERS if partner_users else Loan.Status.SUBMITTED,
+            **validated_data,
         )
+        LoanBorrower.objects.create(loan=loan, user=request.user, is_primary=True, status=LoanBorrower.Status.ACCEPTED, responded_at=timezone.now())
+        for partner in partner_users:
+            LoanBorrower.objects.create(loan=loan, user=partner, status=LoanBorrower.Status.PENDING)
+        from .services import sync_collective_shares
+        sync_collective_shares(loan, shares)
+        return loan
 
 
 class FundingContributionSerializer(serializers.Serializer):
@@ -477,7 +684,7 @@ class FundingContributionSerializer(serializers.Serializer):
 
 
 class AssistedDepositSerializer(serializers.Serializer):
-    club = serializers.PrimaryKeyRelatedField(queryset=Club.objects.filter(status=Club.Status.ACTIVE))
+    club = serializers.PrimaryKeyRelatedField(queryset=Club.objects.filter(status=Club.Status.ACTIVE), required=False, allow_null=True)
     lender = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
     amount = serializers.DecimalField(max_digits=16, decimal_places=2, min_value=Decimal("0.01"))
     payment_method = serializers.CharField(max_length=40, default="cash")
@@ -492,7 +699,7 @@ class AssistedDepositSerializer(serializers.Serializer):
 
 
 class AssistedWithdrawalSerializer(serializers.Serializer):
-    club = serializers.PrimaryKeyRelatedField(queryset=Club.objects.filter(status=Club.Status.ACTIVE))
+    club = serializers.PrimaryKeyRelatedField(queryset=Club.objects.filter(status=Club.Status.ACTIVE), required=False, allow_null=True)
     lender = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
     amount = serializers.DecimalField(max_digits=16, decimal_places=2, min_value=Decimal("0.01"))
 
@@ -506,10 +713,14 @@ class AssistedLoanSerializer(serializers.Serializer):
     club = serializers.PrimaryKeyRelatedField(queryset=Club.objects.filter(status=Club.Status.ACTIVE))
     borrower = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True))
     amount = serializers.DecimalField(max_digits=16, decimal_places=2, min_value=Decimal("0.01"))
-    duration_months = serializers.IntegerField(min_value=1)
-    purpose = serializers.CharField(max_length=240)
+    duration_code = serializers.ChoiceField(choices=list(LOAN_DURATIONS))
+    repayment_frequency = serializers.ChoiceField(choices=list(REPAYMENT_FREQUENCIES))
+    purpose_id = serializers.PrimaryKeyRelatedField(queryset=LoanPurpose.objects.filter(is_active=True), required=False, allow_null=True)
+    purpose = serializers.CharField(max_length=240, required=False, allow_blank=True)
     estimated_income = serializers.DecimalField(max_digits=16, decimal_places=2, min_value=Decimal("0"))
     guarantors = serializers.CharField(required=False, allow_blank=True)
+    partners = serializers.ListField(child=serializers.IntegerField(), required=False)
+    shares = serializers.DictField(child=serializers.DecimalField(max_digits=16, decimal_places=2), required=False)
 
     def validate(self, attrs):
         club = attrs["club"]
@@ -523,9 +734,38 @@ class AssistedLoanSerializer(serializers.Serializer):
             raise serializers.ValidationError({"borrower": "Ce client doit disposer d'un profil emprunteur actif dans ce club."})
         if not club.min_loan <= attrs["amount"] <= club.max_loan:
             raise serializers.ValidationError({"amount": "Montant hors des limites du club."})
-        if not club.min_duration_months <= attrs["duration_months"] <= club.max_duration_months:
-            raise serializers.ValidationError({"duration_months": "Duree hors des limites du club."})
+        if attrs["duration_code"] not in club.duration_options:
+            raise serializers.ValidationError({"duration_code": "Cette duree n'est pas proposee par le club."})
+        count = installment_count(attrs["duration_code"], attrs["repayment_frequency"])
+        if count <= 0:
+            allowed = ", ".join(REPAYMENT_FREQUENCIES[code]["label"] for code in allowed_frequencies(attrs["duration_code"]))
+            raise serializers.ValidationError({"repayment_frequency": f"Frequence incompatible avec la duree. Frequences possibles : {allowed}."})
+        if not attrs.get("purpose_id") and not (attrs.get("purpose") or "").strip():
+            raise serializers.ValidationError({"purpose_id": "Selectionnez l'objet du pret."})
+        attrs["installment_total"] = count
         return attrs
+
+
+class LoanSimulationSerializer(serializers.Serializer):
+    club = serializers.PrimaryKeyRelatedField(queryset=Club.objects.all())
+    amount = serializers.DecimalField(max_digits=16, decimal_places=2, min_value=Decimal("0.01"))
+    duration_code = serializers.ChoiceField(choices=list(LOAN_DURATIONS))
+    repayment_frequency = serializers.ChoiceField(choices=list(REPAYMENT_FREQUENCIES))
+
+
+class FundingReviewSerializer(serializers.Serializer):
+    approve = serializers.BooleanField(default=True)
+    reason = serializers.CharField(required=False, allow_blank=True)
+
+
+class CollectionAgentSerializer(serializers.Serializer):
+    agent = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(is_active=True), required=False, allow_null=True)
+
+
+class CollectiveResponseSerializer(serializers.Serializer):
+    accept = serializers.BooleanField(default=True)
+    share_amount = serializers.DecimalField(max_digits=16, decimal_places=2, required=False, allow_null=True)
+    reason = serializers.CharField(required=False, allow_blank=True)
 
 
 class AssistedFundingSerializer(FundingContributionSerializer):
@@ -537,12 +777,13 @@ class RepaymentSerializer(serializers.ModelSerializer):
         model = Repayment
         fields = [
             "id", "reference", "loan", "payer", "amount", "currency", "payment_method", "status",
-            "principal_paid", "interest_paid", "fee_paid", "penalty_paid", "created_at",
+            "principal_paid", "interest_paid", "fee_paid", "leader_commission_paid", "penalty_paid", "created_at",
         ]
         read_only_fields = fields
 
 
 class WithdrawalSerializer(serializers.ModelSerializer):
+    club = serializers.PrimaryKeyRelatedField(queryset=Club.objects.all(), required=False, allow_null=True)
     lender_name = serializers.CharField(source="lender.display_name", read_only=True)
     lender_avatar = serializers.ImageField(source="lender.avatar", read_only=True)
     lender_selfie = serializers.ImageField(source="lender.selfie", read_only=True)
@@ -554,8 +795,9 @@ class WithdrawalSerializer(serializers.ModelSerializer):
         read_only_fields = ["reference", "lender", "currency", "status", "decision_reason"]
 
     def create(self, validated_data):
-        club = validated_data["club"]
-        return Withdrawal.objects.create(lender=self.context["request"].user, currency=club.currency, **validated_data)
+        club = validated_data.get("club")
+        currency = club.currency if club else PlatformSettings.load().default_currency
+        return Withdrawal.objects.create(lender=self.context["request"].user, currency=currency, **validated_data)
 
 
 class NotificationSerializer(serializers.ModelSerializer):
@@ -640,7 +882,13 @@ class InvitationSerializer(serializers.ModelSerializer):
 
 
 class PlatformSettingsSerializer(serializers.ModelSerializer):
+    default_borrower_charge_rate = serializers.SerializerMethodField()
+
+    def get_default_borrower_charge_rate(self, obj) -> str:
+        """Taux unique affiche a l'emprunteur : somme des trois composantes."""
+        return str(obj.default_interest_rate + obj.default_commission_rate + obj.default_leader_commission_rate)
+
     class Meta:
         model = PlatformSettings
-        fields = ["platform_name", "default_currency", "default_interest_rate", "default_penalty_rate", "default_commission_rate", "max_loan", "require_double_validation", "kyc_required", "maintenance_mode", "support_phone", "updated_at"]
-        read_only_fields = ["updated_at"]
+        fields = ["default_currency", "default_interest_rate", "default_commission_rate", "default_leader_commission_rate", "default_penalty_rate", "default_borrower_charge_rate", "max_loan", "default_collective_borrowers", "require_double_validation", "kyc_required", "maintenance_mode", "support_phone", "updated_at"]
+        read_only_fields = ["updated_at", "default_borrower_charge_rate"]

@@ -18,14 +18,27 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 
-from .models import AuditLog, Club, ClubMessage, Deposit, Dispute, EconomicActivity, Invitation, KYCApplication, Loan, LoanFunding, Membership, Notification, OTPChallenge, PlatformSettings, Repayment, User, Withdrawal
+from .models import (
+    LOAN_DURATIONS, REPAYMENT_FREQUENCIES,
+    AuditLog, Club, ClubMessage, Deposit, Dispute, EconomicActivity, Installment, Invitation, KYCApplication,
+    Loan, LoanBorrower, LoanFunding, LoanPurpose, Membership, Notification, OTPChallenge, PlatformSettings,
+    Repayment, User, Withdrawal, allowed_frequencies, duration_in_months, installment_count,
+)
 from .permissions import IsPlatformAdmin
 from .serializers import (
-    AssistedDepositSerializer, AssistedFundingSerializer, AssistedLoanSerializer, AssistedWithdrawalSerializer, AuditLogSerializer, ClubMessageSerializer, ClubSerializer, DepositSerializer, DisputeSerializer, FundingContributionSerializer, KYCApplicationSerializer, LoanSerializer, MembershipSerializer,
-    EconomicActivitySerializer, InvitationSerializer, ManagedUserSerializer, ManagedUserUpdateSerializer, NotificationSerializer, OTPRequestSerializer, OTPVerifySerializer, PlatformSettingsSerializer,
+    AssistedDepositSerializer, AssistedFundingSerializer, AssistedLoanSerializer, AssistedWithdrawalSerializer, AuditLogSerializer,
+    ClubMessageSerializer, ClubSerializer, CollectionAgentSerializer, CollectiveResponseSerializer, DepositSerializer, DisputeSerializer,
+    FundingContributionSerializer, FundingReviewSerializer, KYCApplicationSerializer, LoanBorrowerSerializer, LoanFundingSerializer,
+    LoanPurposeSerializer, LoanSerializer, LoanSimulationSerializer, MembershipSerializer,
+    EconomicActivitySerializer, InvitationSerializer, ManagedUserSerializer, ManagedUserUpdateSerializer, NotificationSerializer,
+    OTPRequestSerializer, OTPVerifySerializer, PlatformSettingsSerializer,
     RegisterSerializer, RepaymentSerializer, UserSerializer, WithdrawalSerializer,
 )
-from .services import add_months, approve_loan, audit, club_finances, disburse_loan, fund_loan, lender_total_available, money, notify, record_repayment, validate_deposit
+from .services import (
+    add_months, approve_loan, audit, can_collect, club_finances, collective_is_ready, disburse_loan, fund_loan,
+    installment_dates, is_platform_admin, lender_total_available, loan_cost_breakdown, money, notify,
+    platform_admins, record_repayment, review_funding, submit_loan, sync_collective_shares, validate_deposit,
+)
 
 
 def accessible_clubs(user):
@@ -37,7 +50,8 @@ def accessible_clubs(user):
     if profile == User.Role.LEADER:
         return Club.objects.filter(leader=user)
     if profile == User.Role.LENDER:
-        return Club.objects.filter(status=Club.Status.ACTIVE)
+        # Le preteur n'a aucun lien avec les clubs : son portefeuille est global.
+        return Club.objects.none()
     membership_role = Membership.Role.BORROWER if profile == User.Role.BORROWER else profile
     return Club.objects.filter(memberships__user=user, memberships__role=membership_role, memberships__status=Membership.Status.ACTIVE).distinct()
 
@@ -54,10 +68,12 @@ def financial_balance(user):
     clubs = accessible_clubs(user)
     is_admin = user.role == User.Role.ADMIN or user.is_superuser
     if is_admin:
-        deposits = Deposit.objects.filter(club__in=clubs, status=Deposit.Status.VALIDATED).select_related("club", "lender")
-        withdrawal_history = Withdrawal.objects.filter(club__in=clubs).select_related("club", "lender")
-        fundings = LoanFunding.objects.filter(loan__club__in=clubs).select_related("loan", "loan__club", "lender")
-        repayments = Repayment.objects.filter(loan__club__in=clubs, status=Repayment.Status.VALIDATED).select_related("loan", "loan__club")
+        # Le portefeuille preteur est global : les depots et retraits ne sont plus
+        # filtres par club.
+        deposits = Deposit.objects.filter(status=Deposit.Status.VALIDATED).select_related("club", "lender")
+        withdrawal_history = Withdrawal.objects.all().select_related("club", "lender")
+        fundings = LoanFunding.objects.all().select_related("loan", "loan__club", "lender")
+        repayments = Repayment.objects.filter(status=Repayment.Status.VALIDATED).select_related("loan", "loan__club")
     else:
         deposits = Deposit.objects.filter(lender=user, status=Deposit.Status.VALIDATED).select_related("club", "lender")
         withdrawal_history = Withdrawal.objects.filter(lender=user).select_related("club", "lender")
@@ -78,7 +94,6 @@ def financial_balance(user):
 
     if is_admin:
         disbursed_loans = Loan.objects.filter(
-            club__in=clubs,
             status__in=[Loan.Status.DISBURSED, Loan.Status.CURRENT, Loan.Status.LATE, Loan.Status.DISPUTED],
         )
         principal_outstanding = Decimal("0")
@@ -86,20 +101,28 @@ def financial_balance(user):
             principal_paid = loan.repayments.filter(status=Repayment.Status.VALIDATED).aggregate(total=Sum("principal_paid"))["total"] or Decimal("0")
             principal_outstanding += max(loan.amount - principal_paid, Decimal("0"))
         reserved_capital = sum((max(funding.amount - funding.principal_repaid, Decimal("0")) for funding in ongoing if funding.loan.status == Loan.Status.APPROVED), Decimal("0"))
-        fee_collected = repayments.aggregate(total=Sum("fee_paid"))["total"] or Decimal("0")
-        penalty_collected = repayments.aggregate(total=Sum("penalty_paid"))["total"] or Decimal("0")
-        interest_collected = repayments.aggregate(total=Sum("interest_paid"))["total"] or Decimal("0")
+        pending_capital = sum((funding.pending_amount for funding in funding_rows), Decimal("0"))
+        totals_paid = repayments.aggregate(
+            fee=Sum("fee_paid"), penalty=Sum("penalty_paid"),
+            interest=Sum("interest_paid"), leader=Sum("leader_commission_paid"),
+        )
+        fee_collected = totals_paid["fee"] or Decimal("0")
+        penalty_collected = totals_paid["penalty"] or Decimal("0")
+        interest_collected = totals_paid["interest"] or Decimal("0")
+        leader_collected = totals_paid["leader"] or Decimal("0")
         commissions_collected = fee_collected + penalty_collected
-        earnings_collected = commissions_collected + interest_collected
-        loan_totals = Loan.objects.filter(club__in=clubs).aggregate(fees=Sum("fee_total"), interest=Sum("interest_total"))
-        billed_fees = (loan_totals["fees"] or Decimal("0")) + (loan_totals["interest"] or Decimal("0"))
+        earnings_collected = commissions_collected + interest_collected + leader_collected
+        loan_totals = Loan.objects.all().aggregate(fees=Sum("fee_total"), interest=Sum("interest_total"), leader=Sum("leader_commission_total"))
+        billed_fees = (loan_totals["fees"] or Decimal("0")) + (loan_totals["interest"] or Decimal("0")) + (loan_totals["leader"] or Decimal("0"))
         net_available = max(total_deposits - total_withdrawals - principal_outstanding + earnings_collected, Decimal("0"))
-        free_after_commitments = max(net_available - reserved_capital, Decimal("0"))
+        free_after_commitments = max(net_available - reserved_capital - pending_capital, Decimal("0"))
     else:
         principal_outstanding = ongoing_capital
         reserved_capital = sum((max(funding.amount - funding.principal_repaid, Decimal("0")) for funding in ongoing if funding.loan.status == Loan.Status.APPROVED), Decimal("0"))
+        pending_capital = sum((funding.pending_amount for funding in funding_rows), Decimal("0"))
         earnings_collected = sum((funding.interest_earned for funding in funding_rows), Decimal("0"))
         interest_collected = earnings_collected
+        leader_collected = Decimal("0")
         commissions_collected = Decimal("0")
         billed_fees = expected_gains
         net_available = lender_total_available(user)
@@ -107,7 +130,7 @@ def financial_balance(user):
 
     events = []
     for deposit in deposits.order_by("-created_at")[:8]:
-        events.append({"id": str(deposit.id), "kind": "deposit", "title": "Depot valide", "club": deposit.club.name, "amount": str(deposit.amount), "direction": "in", "date": deposit.validated_at or deposit.created_at})
+        events.append({"id": str(deposit.id), "kind": "deposit", "title": "Depot valide", "club": deposit.club.name if deposit.club else "Portefeuille global", "amount": str(deposit.amount), "direction": "in", "date": deposit.validated_at or deposit.created_at})
     withdrawal_titles = {
         Withdrawal.Status.SUBMITTED: "Retrait soumis",
         Withdrawal.Status.REVIEW: "Retrait en verification",
@@ -119,7 +142,7 @@ def financial_balance(user):
         events.append({
             "id": str(withdrawal.id), "kind": "withdrawal",
             "title": withdrawal_titles.get(withdrawal.status, "Demande de retrait"),
-            "club": withdrawal.club.name, "amount": str(withdrawal.amount),
+            "club": withdrawal.club.name if withdrawal.club else "Portefeuille global", "amount": str(withdrawal.amount),
             "direction": "out" if withdrawal.status == Withdrawal.Status.PAID else "neutral",
             "status": withdrawal.status, "date": withdrawal.updated_at,
         })
@@ -129,7 +152,7 @@ def financial_balance(user):
         if returned > 0:
             events.append({"id": f"return-{funding.id}", "kind": "return", "title": "Capital et gain recuperes", "club": funding.loan.club.name, "amount": str(returned), "direction": "in", "date": funding.updated_at, "loan": str(funding.loan_id)})
     events.sort(key=lambda item: item["date"], reverse=True)
-    currency = clubs.values_list("currency", flat=True).first() or "CDF"
+    currency = clubs.values_list("currency", flat=True).first() or PlatformSettings.load().default_currency
     return {
         "currency": currency,
         "total_deposits": str(money(total_deposits)), "total_withdrawals": str(money(total_withdrawals)),
@@ -139,6 +162,8 @@ def financial_balance(user):
         "completed_placements": str(money(completed_capital)), "completed_count": len(completed),
         "recovered_capital": str(money(recovered_capital)), "earnings_collected": str(money(earnings_collected)),
         "commissions_collected": str(money(commissions_collected)), "interest_collected": str(money(interest_collected)),
+        "leader_commission_collected": str(money(leader_collected)),
+        "pending_placements": str(money(pending_capital)),
         "earnings_expected": str(money(billed_fees)), "activity": events[:20],
     }
 
@@ -147,8 +172,8 @@ def can_manage_club(user, club):
     return user.is_superuser or user.role == User.Role.ADMIN or (club.leader_id == user.id and user.current_profile == User.Role.LEADER)
 
 
-def is_platform_admin(user):
-    return user.is_superuser or user.role == User.Role.ADMIN
+def deny(message, status_code=403):
+    return Response({"detail": message}, status=status_code)
 
 
 @extend_schema(request=RegisterSerializer, responses={201: OpenApiTypes.OBJECT})
@@ -184,6 +209,23 @@ def switch_profile(request):
     request.user.save(update_fields=["active_profile"])
     audit(request.user, "profile.switched", request.user, new={"profile": profile})
     return Response(UserSerializer(request.user).data)
+
+
+@extend_schema(responses=OpenApiTypes.OBJECT)
+@api_view(["GET"])
+def loan_catalog(request):
+    """Durees, frequences compatibles et objets de pret, pour alimenter les selects."""
+    return Response({
+        "durations": [{
+            "code": code, "label": item["label"],
+            "frequencies": [{
+                "code": frequency, "label": REPAYMENT_FREQUENCIES[frequency]["label"],
+                "installments": installment_count(code, frequency),
+            } for frequency in allowed_frequencies(code)],
+        } for code, item in LOAN_DURATIONS.items()],
+        "frequencies": [{"code": code, "label": item["label"]} for code, item in REPAYMENT_FREQUENCIES.items()],
+        "purposes": LoanPurposeSerializer(LoanPurpose.objects.filter(is_active=True), many=True).data,
+    })
 
 
 @extend_schema(responses=OpenApiTypes.OBJECT)
@@ -256,15 +298,17 @@ def verify_otp(request):
 @api_view(["GET"])
 def dashboard(request):
     clubs = accessible_clubs(request.user)
-    loans = Loan.objects.filter(club__in=clubs)
-    deposits = Deposit.objects.filter(club__in=clubs, status=Deposit.Status.VALIDATED)
+    is_admin = request.user.role == User.Role.ADMIN or request.user.is_superuser
     profile = request.user.current_profile
-    balance = financial_balance(request.user) if profile == User.Role.LENDER or request.user.role == User.Role.ADMIN or request.user.is_superuser else None
-    if profile == User.Role.LENDER:
-        deposits = deposits.filter(lender=request.user)
-        loans = loans.filter(fundings__lender=request.user).distinct()
+    loans = Loan.objects.all() if is_admin else Loan.objects.filter(club__in=clubs)
+    deposits = Deposit.objects.filter(status=Deposit.Status.VALIDATED) if is_admin else Deposit.objects.none()
+    balance = financial_balance(request.user) if profile == User.Role.LENDER or is_admin else None
+    if profile == User.Role.LENDER and not is_admin:
+        # Le preteur est hors club : son perimetre est son portefeuille global.
+        deposits = Deposit.objects.filter(lender=request.user, status=Deposit.Status.VALIDATED)
+        loans = Loan.objects.filter(fundings__lender=request.user).distinct()
     elif profile == User.Role.BORROWER:
-        loans = loans.filter(borrower=request.user)
+        loans = loans.filter(Q(borrower=request.user) | Q(borrowers__user=request.user)).distinct()
     total_deposits = deposits.aggregate(total=Sum("amount"))["total"] or Decimal("0")
     total_due = loans.aggregate(total=Sum("total_due"))["total"] or Decimal("0")
     total_paid = loans.aggregate(total=Sum("total_paid"))["total"] or Decimal("0")
@@ -279,11 +323,11 @@ def dashboard(request):
     gain_map = {month.strftime("%Y-%m"): Decimal("0") for month in month_starts}
     gain_repayments = Repayment.objects.filter(status=Repayment.Status.VALIDATED, created_at__date__gte=month_starts[0])
     if request.user.role == User.Role.ADMIN or request.user.is_superuser:
-        gain_repayments = gain_repayments.filter(loan__club__in=clubs)
+        pass
         for repayment in gain_repayments:
             key = repayment.created_at.strftime("%Y-%m")
             if key in gain_map:
-                gain_map[key] += repayment.interest_paid + repayment.fee_paid + repayment.penalty_paid
+                gain_map[key] += repayment.interest_paid + repayment.fee_paid + repayment.leader_commission_paid + repayment.penalty_paid
     elif profile == User.Role.LENDER:
         lender_fundings = {funding.loan_id: funding for funding in LoanFunding.objects.filter(lender=request.user).select_related("loan")}
         gain_repayments = gain_repayments.filter(loan_id__in=lender_fundings).select_related("loan")
@@ -298,21 +342,33 @@ def dashboard(request):
     } for month in month_starts]
     admin_overview = None
     if request.user.role == User.Role.ADMIN or request.user.is_superuser:
-        platform_loans = Loan.objects.filter(club__in=clubs).exclude(status__in=[Loan.Status.REJECTED, Loan.Status.CANCELLED])
-        platform_deposits = Deposit.objects.filter(club__in=clubs, status=Deposit.Status.VALIDATED)
+        platform_loans = Loan.objects.all().exclude(status__in=[Loan.Status.REJECTED, Loan.Status.CANCELLED])
+        platform_deposits = Deposit.objects.filter(status=Deposit.Status.VALIDATED)
         deposit_rows = platform_deposits.filter(created_at__date__gte=month_starts[0]).annotate(month=TruncMonth("created_at")).values("month").annotate(total=Sum("amount"))
         loan_rows = platform_loans.filter(created_at__date__gte=month_starts[0]).annotate(month=TruncMonth("created_at")).values("month").annotate(total=Sum("amount"))
         deposit_map = {row["month"].strftime("%Y-%m"): row["total"] for row in deposit_rows}
         loan_map = {row["month"].strftime("%Y-%m"): row["total"] for row in loan_rows}
+        expected = platform_loans.aggregate(fees=Sum("fee_total"), interest=Sum("interest_total"), leader=Sum("leader_commission_total"))
         admin_overview = {
             "total_deposited": str(money(platform_deposits.aggregate(total=Sum("amount"))["total"] or 0)),
             "total_borrowed": str(money(platform_loans.aggregate(total=Sum("amount"))["total"] or 0)),
-            "total_placed": str(money(LoanFunding.objects.filter(loan__club__in=clubs).aggregate(total=Sum("amount"))["total"] or 0)),
-            "total_repaid": str(money(Repayment.objects.filter(loan__club__in=clubs, status=Repayment.Status.VALIDATED).aggregate(total=Sum("amount"))["total"] or 0)),
+            "total_placed": str(money(LoanFunding.objects.aggregate(total=Sum("amount"))["total"] or 0)),
+            "total_repaid": str(money(Repayment.objects.filter(status=Repayment.Status.VALIDATED).aggregate(total=Sum("amount"))["total"] or 0)),
             "open_funding": platform_loans.filter(status=Loan.Status.APPROVED).count(),
             "late_loans": platform_loans.filter(status=Loan.Status.LATE).count(),
+            "active_loans": platform_loans.filter(status__in=[Loan.Status.CURRENT, Loan.Status.LATE]).count(),
+            "total_clubs": clubs.count(),
             "active_clubs": clubs.filter(status=Club.Status.ACTIVE).count(),
             "active_members": Membership.objects.filter(club__in=clubs, status=Membership.Status.ACTIVE).values("user").distinct().count(),
+            "borrower_members": Membership.objects.filter(club__in=clubs, role=Membership.Role.BORROWER, status=Membership.Status.ACTIVE).values("user").distinct().count(),
+            "lender_members": User.objects.filter(lender_profile_status=User.LenderProfileStatus.ACTIVE, is_active=True).count(),
+            "platform_commission_collected": str(money(Repayment.objects.filter(status=Repayment.Status.VALIDATED).aggregate(total=Sum("fee_paid"))["total"] or 0)),
+            "platform_commission_expected": str(money(expected["fees"] or 0)),
+            "lender_interest_collected": balance["interest_collected"],
+            "lender_interest_expected": str(money(expected["interest"] or 0)),
+            "leader_commission_collected": balance["leader_commission_collected"],
+            "leader_commission_expected": str(money(expected["leader"] or 0)),
+            "pending_placements": balance["pending_placements"],
             "total_withdrawn": balance["total_withdrawals"],
             "net_available": balance["net_available"],
             "free_after_commitments": balance["free_after_commitments"],
@@ -341,7 +397,7 @@ def dashboard(request):
             "completed_placements": balance["completed_placements"] if balance else "0.00",
             "completed_placements_count": balance["completed_count"] if balance else 0,
             "active_loans": loans.filter(status__in=[Loan.Status.CURRENT, Loan.Status.LATE]).count(),
-            "pending_actions": Deposit.objects.filter(club__in=clubs, status=Deposit.Status.PENDING).count() + Withdrawal.objects.filter(club__in=clubs, status__in=[Withdrawal.Status.SUBMITTED, Withdrawal.Status.REVIEW]).count() + loans.filter(status=Loan.Status.SUBMITTED).count(),
+            "pending_actions": (Deposit.objects.filter(status=Deposit.Status.PENDING).count() + Withdrawal.objects.filter(status__in=[Withdrawal.Status.SUBMITTED, Withdrawal.Status.REVIEW]).count() + LoanFunding.objects.filter(pending_amount__gt=0).count() if is_admin else 0) + loans.filter(status=Loan.Status.SUBMITTED).count(),
         },
         "recent_loans": LoanSerializer(loans.order_by("-created_at")[:4], many=True, context={"request": request}).data,
         "membership_invitations": MembershipSerializer(membership_invitations, many=True).data,
@@ -368,12 +424,16 @@ def activity_counts(request):
         Q(sender=request.user) | Q(recipient=request.user)
     )
     unread_chat = visible_messages.exclude(sender=request.user).exclude(read_by=request.user).count()
-    manager = request.user.role == User.Role.ADMIN or request.user.current_profile == User.Role.LEADER
-    validations = {"deposits": 0, "withdrawals": 0, "loans": 0, "memberships": 0, "lender_profiles": 0, "activities": 0, "kyc": 0, "total": 0}
+    admin = request.user.role == User.Role.ADMIN or request.user.is_superuser
+    manager = admin or request.user.current_profile == User.Role.LEADER
+    validations = {"deposits": 0, "withdrawals": 0, "loans": 0, "memberships": 0, "lender_profiles": 0, "activities": 0, "kyc": 0, "placements": 0, "total": 0}
     disputes = identities = invitations = activities = 0
     if manager:
-        validations["deposits"] = Deposit.objects.filter(club__in=clubs, status=Deposit.Status.PENDING).count()
-        validations["withdrawals"] = Withdrawal.objects.filter(club__in=clubs, status__in=[Withdrawal.Status.SUBMITTED, Withdrawal.Status.REVIEW]).count()
+        # Depots, retraits et placements sont des operations de caisse : admin seul.
+        if admin:
+            validations["deposits"] = Deposit.objects.filter(status=Deposit.Status.PENDING).count()
+            validations["withdrawals"] = Withdrawal.objects.filter(status__in=[Withdrawal.Status.SUBMITTED, Withdrawal.Status.REVIEW]).count()
+            validations["placements"] = LoanFunding.objects.filter(pending_amount__gt=0).count()
         validations["loans"] = Loan.objects.filter(club__in=clubs, status__in=[Loan.Status.SUBMITTED, Loan.Status.REVIEW]).count()
         pending_memberships = Membership.objects.filter(club__in=clubs, status=Membership.Status.PENDING)
         if request.user.role == User.Role.ADMIN:
@@ -384,7 +444,7 @@ def activity_counts(request):
         else:
             pending_memberships = pending_memberships.filter(leader_approved_at__isnull=True).exclude(user=request.user)
         validations["memberships"] = pending_memberships.count()
-        validations["total"] = validations["deposits"] + validations["withdrawals"] + validations["loans"] + validations["memberships"] + validations["lender_profiles"] + validations["activities"] + validations["kyc"]
+        validations["total"] = sum(value for key, value in validations.items() if key != "total")
         disputes = Dispute.objects.filter(club__in=clubs, status__in=[Dispute.Status.OPEN, Dispute.Status.REVIEW]).count()
         if request.user.role == User.Role.ADMIN or request.user.is_superuser:
             identities = KYCApplication.objects.filter(status__in=[KYCApplication.Status.SUBMITTED, KYCApplication.Status.REVIEW]).count()
@@ -399,13 +459,18 @@ def activity_counts(request):
         user=request.user, status=Membership.Status.PENDING, member_approved_at__isnull=True,
     ).count()
     loan_offers = 0
+    collections = 0
     if request.user.current_profile == User.Role.LENDER:
         loan_offers = Loan.objects.filter(status=Loan.Status.APPROVED, funding_completed_at__isnull=True, club__status=Club.Status.ACTIVE).exclude(fundings__lender=request.user).count()
+    collective_requests = LoanBorrower.objects.filter(user=request.user, status=LoanBorrower.Status.PENDING, loan__status=Loan.Status.PENDING_PARTNERS).count()
+    if not admin:
+        collections = Loan.objects.filter(collection_agent=request.user, status__in=[Loan.Status.CURRENT, Loan.Status.LATE]).count()
     notifications = request.user.notifications.filter(read_at__isnull=True).count()
     return Response({
         "chat": unread_chat, "notifications": notifications, "membership_requests": membership_requests,
         "loan_offers": loan_offers, "validations": validations, "disputes": disputes,
         "identities": identities, "invitations": invitations, "activities": activities,
+        "collective_requests": collective_requests, "collections": collections,
         "management_total": validations["total"] + disputes + invitations + max(identities - validations["kyc"], 0),
     })
 
@@ -728,6 +793,45 @@ class KYCApplicationViewSet(viewsets.ModelViewSet):
             return queryset.filter(user__memberships__club__leader=user).distinct().order_by("-submitted_at", "-created_at")
         return queryset.filter(user=user)
 
+    @action(detail=False, methods=["get"], url_path="missing")
+    def missing(self, request):
+        """Comptes sans dossier KYC : l'admin peut deposer le dossier pour eux."""
+        if not is_platform_admin(request.user):
+            return deny("Consultation reservee a l'administrateur.")
+        queryset = User.objects.filter(is_active=True, kyc_application__isnull=True).exclude(role=User.Role.ADMIN)
+        search = (request.query_params.get("search") or "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(first_name__icontains=search) | Q(last_name__icontains=search) |
+                Q(phone__icontains=search) | Q(email__icontains=search)
+            )
+        queryset = queryset.order_by("first_name", "last_name", "phone")[:100]
+        return Response({"results": UserSerializer(queryset, many=True, context={"request": request}).data})
+
+    @action(detail=False, methods=["post"], url_path="submit-for")
+    @transaction.atomic
+    def submit_for(self, request):
+        """Depot d'un dossier KYC par l'administrateur au nom d'un membre."""
+        if not is_platform_admin(request.user):
+            return deny("Operation reservee a l'administrateur.")
+        member = User.objects.filter(pk=request.data.get("user"), is_active=True).first()
+        if not member:
+            return Response({"user": "Selectionnez un compte actif."}, status=400)
+        instance = KYCApplication.objects.filter(user=member).first()
+        if instance and instance.status in [KYCApplication.Status.SUBMITTED, KYCApplication.Status.REVIEW, KYCApplication.Status.APPROVED]:
+            return Response({"detail": "Ce membre possede deja un dossier en controle ou valide."}, status=400)
+        serializer = self.get_serializer(instance, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        application = serializer.save(
+            user=member, status=KYCApplication.Status.SUBMITTED,
+            submitted_at=timezone.now(), reviewed_at=None, reviewed_by=None, decision_reason="",
+        )
+        member.kyc_verified = False
+        member.save(update_fields=["kyc_verified"])
+        audit(request.user, "kyc.assisted_submitted", application, new={"user": str(member.id), "document_type": application.document_type})
+        notify(member, "Dossier KYC depose", "L'administration a depose votre dossier d'identite pour controle.", "kyc")
+        return Response(self.get_serializer(application).data, status=201)
+
     @action(detail=False, methods=["post"])
     @transaction.atomic
     def submit(self, request):
@@ -813,6 +917,67 @@ class EconomicActivityViewSet(viewsets.ReadOnlyModelViewSet):
         if activity.proposed_by:
             notify(activity.proposed_by, "Activite examinee", f"Votre proposition '{activity.name}' est maintenant {activity.get_status_display().lower()}.", "activity")
         return Response(self.get_serializer(activity).data)
+
+
+
+class LoanPurposeViewSet(viewsets.ModelViewSet):
+    """Objets de pret proposes en liste deroulante. CRUD reserve a l'administrateur."""
+
+    queryset = LoanPurpose.objects.all()
+    serializer_class = LoanPurposeSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        if is_platform_admin(self.request.user):
+            return LoanPurpose.objects.all().order_by("position", "name")
+        return LoanPurpose.objects.filter(is_active=True).order_by("position", "name")
+
+    def _guard(self):
+        if not is_platform_admin(self.request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("La gestion des objets de pret est reservee a l'administrateur.")
+
+    def perform_create(self, serializer):
+        self._guard()
+        purpose = serializer.save(created_by=self.request.user)
+        audit(self.request.user, "loan_purpose.created", purpose, new={"name": purpose.name})
+
+    def perform_update(self, serializer):
+        self._guard()
+        purpose = serializer.save()
+        audit(self.request.user, "loan_purpose.updated", purpose, new={"name": purpose.name, "is_active": purpose.is_active})
+
+    def destroy(self, request, *args, **kwargs):
+        self._guard()
+        purpose = self.get_object()
+        purpose.is_active = False
+        purpose.save(update_fields=["is_active", "updated_at"])
+        audit(request.user, "loan_purpose.archived", purpose, new={"is_active": False})
+        return Response(status=204)
+
+
+class LoanBorrowerViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    """Invitations de prets collectifs recues par l'utilisateur connecte."""
+
+    queryset = LoanBorrower.objects.all()
+    serializer_class = LoanBorrowerSerializer
+
+    def get_queryset(self):
+        return LoanBorrower.objects.filter(user=self.request.user).select_related("loan", "loan__club", "user").order_by("-created_at")
+
+    @action(detail=False, methods=["get"])
+    def pending(self, request):
+        queryset = self.get_queryset().filter(status=LoanBorrower.Status.PENDING, loan__status=Loan.Status.PENDING_PARTNERS)
+        return Response({"results": [{
+            **LoanBorrowerSerializer(row).data,
+            "loan": str(row.loan_id),
+            "loan_reference": row.loan.reference,
+            "loan_amount": str(row.loan.amount),
+            "club_name": row.loan.club.name,
+            "currency": row.loan.currency,
+            "purpose": row.loan.purpose,
+            "requested_by": row.loan.borrower.display_name,
+        } for row in queryset]})
 
 
 class InvitationViewSet(viewsets.ModelViewSet):
@@ -985,13 +1150,16 @@ class DepositViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "head", "options"]
 
     def get_queryset(self):
-        queryset = Deposit.objects.filter(club__in=accessible_clubs(self.request.user)).select_related("club", "lender")
-        if self.request.user.current_profile == User.Role.LENDER:
-            queryset = queryset.filter(lender=self.request.user)
-        return queryset.order_by("-created_at")
+        # Les depots alimentent un portefeuille preteur global : seuls
+        # l'administrateur et le preteur concerne y ont acces.
+        if is_platform_admin(self.request.user):
+            queryset = Deposit.objects.all()
+        else:
+            queryset = Deposit.objects.filter(lender=self.request.user)
+        return queryset.select_related("club", "lender").order_by("-created_at")
 
     def perform_create(self, serializer):
-        club = serializer.validated_data["club"]
+        club = serializer.validated_data.get("club")
         lender = serializer.validated_data.get("lender")
         if self.request.user.current_profile == User.Role.LENDER:
             lender = self.request.user
@@ -1001,10 +1169,11 @@ class DepositViewSet(viewsets.ModelViewSet):
         if lender.lender_profile_status != User.LenderProfileStatus.ACTIVE:
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Le profil preteur global doit etre valide par l'administrateur.")
-        if not can_manage_club(self.request.user, club) and lender != self.request.user:
+        if not is_platform_admin(self.request.user) and lender != self.request.user:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("Vous ne pouvez creer que vos propres depots.")
-        deposit = serializer.save(lender=lender, currency=club.currency)
+        currency = club.currency if club else PlatformSettings.load().default_currency
+        deposit = serializer.save(lender=lender, currency=club.currency if club else currency)
         audit(self.request.user, "deposit.created", deposit, new={"amount": str(deposit.amount)})
 
     @action(detail=False, methods=["post"])
@@ -1015,9 +1184,11 @@ class DepositViewSet(viewsets.ModelViewSet):
         serializer = AssistedDepositSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        club = data.get("club")
         deposit = Deposit.objects.create(
-            club=data["club"], lender=data["lender"], amount=data["amount"],
-            currency=data["club"].currency, payment_method=data["payment_method"],
+            club=club, lender=data["lender"], amount=data["amount"],
+            currency=club.currency if club else PlatformSettings.load().default_currency,
+            payment_method=data["payment_method"],
             provider_reference=data.get("provider_reference", ""),
         )
         audit(request.user, "deposit.assisted_created", deposit, new={
@@ -1028,9 +1199,10 @@ class DepositViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def decide(self, request, pk=None):
-        deposit = self.get_object()
+        """Encaissement d'un depot : administrateur uniquement."""
         if not is_platform_admin(request.user):
-            return Response({"detail": "Seul l'administrateur peut encaisser ou valider un depot."}, status=403)
+            return deny("L'encaissement des depots est reserve a l'administrateur.")
+        deposit = self.get_object()
         deposit = validate_deposit(deposit, request.user, request.data.get("approve", True), request.data.get("reason", ""))
         return Response(self.get_serializer(deposit).data)
 
@@ -1041,126 +1213,275 @@ class LoanViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "head", "options"]
 
     def get_queryset(self):
-        profile = self.request.user.current_profile
-        if profile == User.Role.LENDER and self.request.user.role != User.Role.ADMIN:
-            queryset = Loan.objects.filter(club__status=Club.Status.ACTIVE)
-        else:
-            queryset = Loan.objects.filter(club__in=accessible_clubs(self.request.user))
-        queryset = queryset.select_related("club", "borrower").prefetch_related("installments", "fundings__lender", "repayments")
-        if profile == User.Role.BORROWER:
-            queryset = queryset.filter(borrower=self.request.user)
+        user = self.request.user
+        profile = user.current_profile
+        if is_platform_admin(user):
+            queryset = Loan.objects.all()
         elif profile == User.Role.LENDER:
+            # Le preteur voit le marche des prets valides, sans lien avec les clubs.
+            queryset = Loan.objects.filter(club__status=Club.Status.ACTIVE)
+        elif profile == User.Role.COLLECTOR:
+            queryset = Loan.objects.filter(collection_agent=user)
+        else:
+            queryset = Loan.objects.filter(club__in=accessible_clubs(user))
+        queryset = queryset.select_related("club", "borrower", "collection_agent", "purpose_reference").prefetch_related("installments", "fundings__lender", "repayments__payer", "borrowers__user")
+        if profile == User.Role.BORROWER and not is_platform_admin(user):
+            queryset = queryset.filter(Q(borrower=user) | Q(borrowers__user=user)).distinct()
+        elif profile == User.Role.LENDER and not is_platform_admin(user):
             queryset = queryset.filter(
                 Q(status=Loan.Status.APPROVED, funding_completed_at__isnull=True) |
-                Q(fundings__lender=self.request.user)
+                Q(fundings__lender=user)
             ).distinct()
+        elif profile == User.Role.LEADER and not is_platform_admin(user):
+            # Un chef ne voit jamais les prets d'un autre club.
+            queryset = queryset.exclude(status=Loan.Status.PENDING_PARTNERS).filter(club__leader=user)
         return queryset.order_by("-created_at")
 
     def perform_create(self, serializer):
         loan = serializer.save()
-        audit(self.request.user, "loan.submitted", loan, new={"amount": str(loan.amount)})
-        recipients = {recipient for recipient in {loan.club.leader, *User.objects.filter(role=User.Role.ADMIN, is_active=True)} if recipient}
-        for recipient in recipients:
-            notify(recipient, "Nouvelle demande de pret", f"{loan.borrower.display_name} demande {loan.amount} {loan.currency} dans {loan.club.name}.", "loan_review", {"loan": str(loan.id)})
+        if loan.status == Loan.Status.PENDING_PARTNERS:
+            audit(self.request.user, "loan.collective_started", loan, new={"amount": str(loan.amount)})
+            for row in loan.borrowers.exclude(user=self.request.user).select_related("user"):
+                notify(
+                    row.user, "Invitation a un pret collectif",
+                    f"{loan.borrower.display_name} vous propose de partager un pret de {loan.amount} {loan.currency}. Votre part proposee: {row.share_amount} {loan.currency}.",
+                    "collective_request", {"loan": str(loan.id)},
+                )
+        else:
+            submit_loan(loan, self.request.user)
+
+    # ------------------------------------------------------------- catalogues
+    @action(detail=False, methods=["get"])
+    def catalog(self, request):
+        """Durees, frequences compatibles et objets de pret disponibles."""
+        return Response({
+            "durations": [{
+                "code": code, "label": item["label"],
+                "frequencies": [{
+                    "code": frequency, "label": REPAYMENT_FREQUENCIES[frequency]["label"],
+                    "installments": installment_count(code, frequency),
+                } for frequency in allowed_frequencies(code)],
+            } for code, item in LOAN_DURATIONS.items()],
+            "purposes": LoanPurposeSerializer(LoanPurpose.objects.filter(is_active=True), many=True).data,
+        })
 
     @action(detail=False, methods=["post"])
     @transaction.atomic
     def assisted(self, request):
-        if request.user.role != User.Role.ADMIN and not request.user.is_superuser:
-            return Response({"detail": "Operation reservee a l'administrateur."}, status=403)
+        if not is_platform_admin(request.user):
+            return deny("Operation reservee a l'administrateur.")
         serializer = AssistedLoanSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         club = data.pop("club")
         borrower = data.pop("borrower")
-        create_borrower_membership = data.pop("create_borrower_membership", False)
-        if create_borrower_membership:
-            membership, created = Membership.objects.get_or_create(
-                club=club, user=borrower, role=Membership.Role.BORROWER,
-                defaults={
-                    "status": Membership.Status.ACTIVE, "reviewed_by": request.user,
-                    "reviewed_at": timezone.now(), "decision_reason": "Profil active pour une demande admin assistee.",
-                },
-            )
-            if not created and membership.status != Membership.Status.ACTIVE:
-                membership.status = Membership.Status.ACTIVE
-                membership.reviewed_by = request.user
-                membership.reviewed_at = timezone.now()
-                membership.decision_reason = "Profil active pour une demande admin assistee."
-                membership.save(update_fields=["status", "reviewed_by", "reviewed_at", "decision_reason", "updated_at"])
-            audit(request.user, "membership.admin_activated", membership, new={"role": membership.role, "user": str(borrower.id), "created": created})
+        partners = data.pop("partners", [])
+        shares = data.pop("shares", {})
+        purpose_reference = data.pop("purpose_id", None)
+        purpose = purpose_reference.name if purpose_reference else data.pop("purpose", "")
+        data.pop("purpose", None)
+        partner_users = list(User.objects.filter(id__in=partners, is_active=True).exclude(pk=borrower.pk)) if partners else []
         loan = Loan.objects.create(
-            club=club, borrower=borrower, currency=club.currency,
-            interest_rate=club.interest_rate, fee_rate=club.platform_fee_rate, **data,
+            club=club, borrower=borrower, currency=club.currency, purpose=purpose,
+            purpose_reference=purpose_reference,
+            interest_rate=club.interest_rate, fee_rate=club.platform_fee_rate,
+            leader_commission_rate=club.leader_commission_rate,
+            duration_months=duration_in_months(data["duration_code"]),
+            is_collective=bool(partner_users),
+            status=Loan.Status.PENDING_PARTNERS if partner_users else Loan.Status.SUBMITTED,
+            **data,
         )
-        audit(request.user, "loan.assisted_submitted", loan, new={
-            "amount": str(loan.amount), "borrower": str(borrower.id),
-        })
-        recipients = {recipient for recipient in {club.leader, *User.objects.filter(role=User.Role.ADMIN, is_active=True)} if recipient}
-        for recipient in recipients:
-            notify(recipient, "Nouvelle demande de pret assistee", f"{borrower.display_name} demande {loan.amount} {loan.currency} dans {club.name}.", "loan_review", {"loan": str(loan.id)})
+        LoanBorrower.objects.create(loan=loan, user=borrower, is_primary=True, status=LoanBorrower.Status.ACCEPTED, responded_at=timezone.now())
+        for partner in partner_users:
+            LoanBorrower.objects.create(loan=loan, user=partner, status=LoanBorrower.Status.PENDING)
+        sync_collective_shares(loan, shares)
+        audit(request.user, "loan.assisted_submitted", loan, new={"amount": str(loan.amount), "borrower": str(borrower.id)})
+        if loan.status == Loan.Status.SUBMITTED:
+            for recipient in {item for item in {club.leader, *platform_admins()} if item}:
+                notify(recipient, "Nouvelle demande de pret assistee", f"{borrower.display_name} demande {loan.amount} {loan.currency} dans {club.name}.", "loan_review", {"loan": str(loan.id)})
+        else:
+            for row in loan.borrowers.exclude(user=borrower).select_related("user"):
+                notify(row.user, "Invitation a un pret collectif", f"{borrower.display_name} vous propose de partager un pret de {loan.amount} {loan.currency}.", "collective_request", {"loan": str(loan.id)})
         notify(borrower, "Demande enregistree", f"La demande {loan.reference} a ete enregistree en votre nom par l'administration.", "loan", {"loan": str(loan.id)})
         return Response(self.get_serializer(loan).data, status=201)
 
     @action(detail=False, methods=["post"])
     def simulate(self, request):
-        club = accessible_clubs(request.user).get(pk=request.data.get("club"))
-        try:
-            amount = money(request.data.get("amount", 0))
-            months = int(request.data.get("duration_months", 0))
-        except (ArithmeticError, TypeError, ValueError):
-            return Response({"detail": "Saisissez un montant et une duree valides."}, status=400)
+        serializer = LoanSimulationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        club = data["club"]
+        if not is_platform_admin(request.user) and club not in accessible_clubs(request.user):
+            return deny("Club inaccessible.")
+        amount = money(data["amount"])
+        duration_code = data["duration_code"]
+        frequency = data["repayment_frequency"]
         if not club.min_loan <= amount <= club.max_loan:
-            return Response({
-                "detail": (
-                    f"Le montant doit etre compris entre {club.min_loan:.0f} "
-                    f"et {club.max_loan:.0f} {club.currency}."
-                )
-            }, status=400)
-        if not club.min_duration_months <= months <= club.max_duration_months:
-            return Response({
-                "detail": (
-                    f"La duree doit etre comprise entre {club.min_duration_months} "
-                    f"et {club.max_duration_months} mois."
-                )
-            }, status=400)
-        interest = money(amount * club.interest_rate / 100 * months)
-        fee = money(amount * club.platform_fee_rate / 100)
-        total = amount + interest + fee
-        return Response({"amount": str(amount), "interest": str(interest), "fees": str(fee), "total_due": str(total), "monthly_payment": str(money(total / months)), "currency": club.currency})
+            return Response({"detail": f"Le montant doit etre compris entre {club.min_loan:.0f} et {club.max_loan:.0f} {club.currency}."}, status=400)
+        if duration_code not in club.duration_options:
+            return Response({"duration_code": "Cette duree n'est pas proposee par le club."}, status=400)
+        count = installment_count(duration_code, frequency)
+        if count <= 0:
+            allowed = ", ".join(REPAYMENT_FREQUENCIES[code]["label"] for code in allowed_frequencies(duration_code))
+            return Response({"repayment_frequency": f"Frequence incompatible avec la duree. Frequences possibles : {allowed}."}, status=400)
+        costs = loan_cost_breakdown(amount, club.interest_rate, club.platform_fee_rate, club.leader_commission_rate)
+        dates = installment_dates(timezone.localdate(), duration_code, frequency)
+        payload = {
+            "amount": str(costs["amount"]),
+            # Vu de l'emprunteur : un seul cout global.
+            "charge": str(costs["charge"]),
+            "charge_rate": str(club.borrower_charge_rate),
+            "total_due": str(costs["total_due"]),
+            "installments": count,
+            "installment_amount": str(money(costs["total_due"] / count)),
+            "duration_label": LOAN_DURATIONS[duration_code]["label"],
+            "frequency_label": REPAYMENT_FREQUENCIES[frequency]["label"],
+            "first_due_date": dates[0],
+            "last_due_date": dates[-1],
+            "currency": club.currency,
+        }
+        if is_platform_admin(request.user):
+            payload.update({
+                "interest": str(costs["interest"]),
+                "platform_commission": str(costs["fee"]),
+                "leader_commission": str(costs["leader_commission"]),
+            })
+        elif request.user.current_profile == User.Role.LEADER:
+            payload["leader_commission"] = str(costs["leader_commission"])
+        return Response(payload)
 
+    # --------------------------------------------------------- pret collectif
+    @action(detail=True, methods=["post"], url_path="respond")
+    @transaction.atomic
+    def respond(self, request, pk=None):
+        """Reponse d'un co-emprunteur invite sur un pret collectif."""
+        loan = self.get_object()
+        row = loan.borrowers.filter(user=request.user).first()
+        if not row or row.is_primary:
+            return deny("Vous n'etes pas invite sur ce pret collectif.")
+        if loan.status != Loan.Status.PENDING_PARTNERS or row.status != LoanBorrower.Status.PENDING:
+            return deny("Cette invitation ne peut plus etre traitee.", 400)
+        serializer = CollectiveResponseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        if not data["accept"]:
+            row.status = LoanBorrower.Status.DECLINED
+            row.responded_at = timezone.now()
+            row.decision_reason = data.get("reason", "")
+            row.save(update_fields=["status", "responded_at", "decision_reason", "updated_at"])
+            loan.status = Loan.Status.CANCELLED
+            loan.decision_reason = f"{request.user.display_name} a refuse de participer."
+            loan.save(update_fields=["status", "decision_reason", "updated_at"])
+            audit(request.user, "loan.collective_declined", loan, new={"user": str(request.user.id)})
+            notify(loan.borrower, "Pret collectif annule", f"{request.user.display_name} a refuse de participer au pret {loan.reference}.", "collective", {"loan": str(loan.id)})
+            return Response(self.get_serializer(loan).data)
+        share = data.get("share_amount")
+        if share is not None:
+            if share <= 0:
+                return Response({"share_amount": "La part doit etre positive."}, status=400)
+            # Seules les parts SAISIES par les autres sont figees : les parts par
+            # defaut (dont celle de l'initiateur) absorbent le reliquat.
+            fixed_by_others = LoanBorrower.objects.filter(loan=loan, share_is_manual=True).exclude(pk=row.pk).aggregate(total=Sum("share_amount"))["total"] or Decimal("0")
+            if money(share) + fixed_by_others > loan.amount:
+                return Response({"share_amount": "La part demandee depasse le capital restant a repartir."}, status=400)
+            row.share_amount = money(share)
+            row.share_is_manual = True
+        row.status = LoanBorrower.Status.ACCEPTED
+        row.responded_at = timezone.now()
+        row.save(update_fields=["share_amount", "share_is_manual", "status", "responded_at", "updated_at"])
+        # Redistribution du reliquat entre les parts non saisies.
+        sync_collective_shares(loan)
+        audit(request.user, "loan.collective_accepted", loan, new={"user": str(request.user.id), "share": str(row.share_amount)})
+        loan.refresh_from_db()
+        if collective_is_ready(loan):
+            submit_loan(loan, request.user)
+            for item in loan.borrowers.select_related("user"):
+                notify(item.user, "Pret collectif transmis", f"Le pret {loan.reference} est complet et transmis pour validation.", "collective", {"loan": str(loan.id)})
+        else:
+            notify(loan.borrower, "Co-emprunteur confirme", f"{request.user.display_name} a accepte une part de {row.share_amount} {loan.currency}.", "collective", {"loan": str(loan.id)})
+        return Response(self.get_serializer(loan).data)
+
+    # ------------------------------------------------------------- decisions
     @action(detail=True, methods=["post"])
     def decide(self, request, pk=None):
         loan = self.get_object()
         if not can_manage_club(request.user, loan.club):
-            return Response({"detail": "Permission refusee."}, status=403)
+            return deny("Permission refusee.")
         loan = approve_loan(loan, request.user, request.data.get("approve", True), request.data.get("reason", ""))
         return Response(self.get_serializer(loan).data)
 
     @action(detail=True, methods=["post"])
     def disburse(self, request, pk=None):
-        loan = self.get_object()
+        """Decaissement : administrateur uniquement."""
         if not is_platform_admin(request.user):
-            return Response({"detail": "Seul l'administrateur peut decaisser un pret."}, status=403)
+            return deny("Le decaissement est reserve a l'administrateur.")
+        loan = self.get_object()
         return Response(self.get_serializer(disburse_loan(loan, request.user)).data)
 
+    @action(detail=True, methods=["post"], url_path="assign-agent")
+    def assign_agent(self, request, pk=None):
+        """Designation du mandataire d'encaissement pour ce pret."""
+        if not is_platform_admin(request.user):
+            return deny("La designation d'un mandataire est reservee a l'administrateur.")
+        loan = self.get_object()
+        serializer = CollectionAgentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        agent = serializer.validated_data.get("agent")
+        if agent and agent.id in {loan.borrower_id, *loan.borrowers.values_list("user_id", flat=True)}:
+            return Response({"agent": "Un emprunteur du pret ne peut pas en etre le mandataire."}, status=400)
+        previous = loan.collection_agent
+        loan.collection_agent = agent
+        loan.collection_agent_assigned_at = timezone.now() if agent else None
+        loan.save(update_fields=["collection_agent", "collection_agent_assigned_at", "updated_at"])
+        audit(request.user, "loan.agent_assigned" if agent else "loan.agent_cleared", loan, old={"agent": str(previous.id) if previous else None}, new={"agent": str(agent.id) if agent else None})
+        if agent:
+            notify(agent, "Mandat d'encaissement", f"Vous encaissez desormais les echeances du pret {loan.reference} ({loan.frequency_label.lower()}).", "collection", {"loan": str(loan.id)})
+        if previous and previous != agent:
+            notify(previous, "Mandat retire", f"Vous n'encaissez plus le pret {loan.reference}.", "collection", {"loan": str(loan.id)})
+        return Response(self.get_serializer(loan).data)
+
+    # -------------------------------------------------------------- placement
     @action(detail=True, methods=["post"])
     def fund(self, request, pk=None):
         loan = self.get_object()
-        is_admin = request.user.role == User.Role.ADMIN or request.user.is_superuser
-        serializer_class = AssistedFundingSerializer if is_admin and request.data.get("lender") else FundingContributionSerializer
+        admin = is_platform_admin(request.user)
+        serializer_class = AssistedFundingSerializer if admin and request.data.get("lender") else FundingContributionSerializer
         serializer = serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
         lender = serializer.validated_data.get("lender", request.user)
         funding = fund_loan(loan, lender, serializer.validated_data["amount"], actor=request.user)
         loan.refresh_from_db()
-        return Response({"funding": {"amount": str(funding.amount)}, "loan": self.get_serializer(loan).data, "forecast": self._funding_forecast(loan, funding.amount)}, status=201)
+        return Response({
+            "funding": LoanFundingSerializer(funding).data,
+            "loan": self.get_serializer(loan).data,
+            "forecast": self._funding_forecast(loan, funding.pending_amount or funding.amount),
+            "message": "Votre placement est enregistre et attend la validation de l'administrateur.",
+        }, status=201)
+
+    @action(detail=False, methods=["get"], url_path="pending-placements")
+    def pending_placements(self, request):
+        if not is_platform_admin(request.user):
+            return deny("Consultation reservee a l'administrateur.")
+        queryset = LoanFunding.objects.filter(pending_amount__gt=0).select_related("loan", "loan__club", "lender").order_by("submitted_at")
+        return Response({"results": LoanFundingSerializer(queryset, many=True).data})
+
+    @action(detail=False, methods=["post"], url_path="placements/(?P<funding_id>[^/.]+)/review")
+    def review_placement(self, request, funding_id=None):
+        if not is_platform_admin(request.user):
+            return deny("La validation des placements est reservee a l'administrateur.")
+        funding = LoanFunding.objects.filter(pk=funding_id).first()
+        if not funding:
+            return deny("Placement introuvable.", 404)
+        serializer = FundingReviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        funding = review_funding(funding, request.user, serializer.validated_data["approve"], serializer.validated_data.get("reason", ""))
+        return Response(LoanFundingSerializer(funding).data)
 
     @action(detail=True, methods=["post"])
     def schedule(self, request, pk=None):
+        if not is_platform_admin(request.user):
+            return deny("La programmation du decaissement est reservee a l'administrateur.")
         loan = self.get_object()
-        if not can_manage_club(request.user, loan.club):
-            return Response({"detail": "Permission refusee."}, status=403)
         if loan.funding_remaining > 0:
             return Response({"detail": "Le financement n'est pas complet."}, status=400)
         from datetime import date
@@ -1172,7 +1493,7 @@ class LoanViewSet(viewsets.ModelViewSet):
             return Response({"date": "La date ne peut pas etre dans le passe."}, status=400)
         loan.scheduled_disbursement_date = scheduled
         loan.save(update_fields=["scheduled_disbursement_date", "updated_at"])
-        for recipient in {recipient for recipient in {loan.borrower, loan.club.leader, *[funding.lender for funding in loan.fundings.select_related("lender")]} if recipient}:
+        for recipient in {item for item in {loan.borrower, loan.club.leader, *[funding.lender for funding in loan.fundings.select_related("lender")]} if item}:
             notify(recipient, "Decaissement programme", f"Le pret {loan.reference} sera decaisse le {scheduled:%d/%m/%Y}.", "disbursement", {"loan": str(loan.id)})
         return Response(self.get_serializer(loan).data)
 
@@ -1180,29 +1501,52 @@ class LoanViewSet(viewsets.ModelViewSet):
     def funding_forecast(self, request, pk=None):
         loan = self.get_object()
         amount = money(request.query_params.get("amount", 0))
-        if amount <= 0 or amount > loan.funding_remaining:
+        if amount <= 0 or amount > loan.funding_open_amount:
             return Response({"amount": "Montant invalide."}, status=400)
         return Response(self._funding_forecast(loan, amount))
 
     def _funding_forecast(self, loan, amount):
-        ratio = amount / loan.amount
+        """Projection du preteur : uniquement SON capital et SON interet."""
+        ratio = amount / loan.amount if loan.amount else Decimal("0")
         gain = money(loan.interest_total * ratio)
-        monthly_principal = money(amount / loan.duration_months)
-        monthly_gain = money(gain / loan.duration_months)
+        count = loan.installment_total or installment_count(loan.duration_code, loan.repayment_frequency) or 1
         start = loan.scheduled_disbursement_date or (timezone.localdate() + timedelta(days=1))
+        dates = installment_dates(start, loan.duration_code, loan.repayment_frequency)
         return {
             "invested": str(amount), "expected_gain": str(gain), "expected_total": str(amount + gain),
-            "first_due_date": add_months(start, 1), "last_due_date": add_months(start, loan.duration_months),
-            "installments": loan.duration_months, "estimated_monthly_return": str(monthly_principal + monthly_gain), "currency": loan.currency,
+            "first_due_date": dates[0], "last_due_date": dates[-1],
+            "installments": count, "estimated_periodic_return": str(money((amount + gain) / count)),
+            "frequency_label": loan.frequency_label, "duration_label": loan.duration_label,
+            "currency": loan.currency,
         }
 
+    # ------------------------------------------------------------ encaissement
     @action(detail=True, methods=["post"], url_path="record-payment")
     def record_payment(self, request, pk=None):
+        """Encaissement : administrateur ou mandataire designe sur ce pret."""
         loan = self.get_object()
-        if not is_platform_admin(request.user):
-            return Response({"detail": "Seul l'administrateur peut encaisser un remboursement."}, status=403)
-        repayment = record_repayment(loan, request.user, request.data.get("amount", 0), request.data.get("payment_method", "cash"))
+        if not can_collect(request.user, loan):
+            return deny("Seul l'administrateur ou le mandataire designe peut encaisser ce pret.")
+        borrower = None
+        borrower_id = request.data.get("borrower")
+        if borrower_id:
+            borrower = User.objects.filter(pk=borrower_id).first()
+            if not borrower:
+                return Response({"borrower": "Co-emprunteur introuvable."}, status=400)
+        repayment = record_repayment(
+            loan, request.user, request.data.get("amount", 0),
+            request.data.get("payment_method", "cash"), borrower=borrower,
+        )
         return Response(RepaymentSerializer(repayment).data, status=201)
+
+    @action(detail=False, methods=["get"], url_path="to-collect")
+    def to_collect(self, request):
+        """Prets a encaisser par l'utilisateur connecte (admin ou mandataire)."""
+        queryset = Loan.objects.filter(status__in=[Loan.Status.CURRENT, Loan.Status.LATE])
+        if not is_platform_admin(request.user):
+            queryset = queryset.filter(collection_agent=request.user)
+        queryset = queryset.select_related("club", "borrower").prefetch_related("installments", "borrowers__user").order_by("-created_at")
+        return Response({"results": self.get_serializer(queryset, many=True).data})
 
 
 class WithdrawalViewSet(viewsets.ModelViewSet):
@@ -1211,13 +1555,13 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "head", "options"]
 
     def get_queryset(self):
-        queryset = Withdrawal.objects.filter(club__in=accessible_clubs(self.request.user)).select_related("club", "lender")
-        if self.request.user.current_profile == User.Role.LENDER:
-            queryset = queryset.filter(lender=self.request.user)
-        return queryset.order_by("-created_at")
+        if is_platform_admin(self.request.user):
+            queryset = Withdrawal.objects.all()
+        else:
+            queryset = Withdrawal.objects.filter(lender=self.request.user)
+        return queryset.select_related("club", "lender").order_by("-created_at")
 
     def perform_create(self, serializer):
-        club = serializer.validated_data["club"]
         if self.request.user.lender_profile_status != User.LenderProfileStatus.ACTIVE:
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Le profil preteur global doit etre actif avant un retrait.")
@@ -1240,9 +1584,11 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
         data = serializer.validated_data
         if lender_total_available(data["lender"]) < data["amount"]:
             return Response({"amount": "Le capital disponible du client est insuffisant."}, status=400)
+        club = data.get("club")
         withdrawal = Withdrawal.objects.create(
-            club=data["club"], lender=data["lender"], amount=data["amount"],
-            currency=data["club"].currency, status=Withdrawal.Status.PAID,
+            club=club, lender=data["lender"], amount=data["amount"],
+            currency=club.currency if club else PlatformSettings.load().default_currency,
+            status=Withdrawal.Status.PAID,
             reviewed_by=request.user, decision_reason="Retrait assiste paye par l'administration.",
         )
         audit(request.user, "withdrawal.assisted_paid", withdrawal, new={
@@ -1260,9 +1606,9 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     @transaction.atomic
     def decide(self, request, pk=None):
-        withdrawal = Withdrawal.objects.select_for_update().get(pk=self.get_object().pk)
         if not is_platform_admin(request.user):
-            return Response({"detail": "Seul l'administrateur peut decaisser ou payer un retrait."}, status=403)
+            return deny("Le decaissement des retraits est reserve a l'administrateur.")
+        withdrawal = Withdrawal.objects.select_for_update().get(pk=self.get_object().pk)
         approve = request.data.get("approve", True)
         reason = request.data.get("reason", "")
         if not approve and not reason:
