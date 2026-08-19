@@ -1,0 +1,3423 @@
+openapi: 3.0.3
+info:
+  title: REBOOT CLUB API
+  version: 1.0.0
+  description: API de gestion des clubs d'epargne et de credit.
+paths:
+  /api/v1/audit-logs/:
+    get:
+      operationId: api_v1_audit_logs_list
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAuditLogList'
+          description: ''
+  /api/v1/audit-logs/{id}/:
+    get:
+      operationId: api_v1_audit_logs_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) audit log.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLog'
+          description: ''
+  /api/v1/auth/me/:
+    get:
+      operationId: api_v1_auth_me_retrieve
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+          description: ''
+    patch:
+      operationId: api_v1_auth_me_partial_update
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedUser'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedUser'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedUser'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+          description: ''
+  /api/v1/auth/otp/request/:
+    post:
+      operationId: api_v1_auth_otp_request_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OTPRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/OTPRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/OTPRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/v1/auth/otp/verify/:
+    post:
+      operationId: api_v1_auth_otp_verify_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OTPVerify'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/OTPVerify'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/OTPVerify'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/v1/auth/register/:
+    post:
+      operationId: api_v1_auth_register_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Register'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Register'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Register'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/v1/auth/switch-profile/:
+    post:
+      operationId: api_v1_auth_switch_profile_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: {}
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: {}
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: {}
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+          description: ''
+  /api/v1/auth/token/:
+    post:
+      operationId: api_v1_auth_token_create
+      description: |-
+        Takes a set of user credentials and returns an access and refresh JSON web
+        token pair to prove the authentication of those credentials.
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenObtainPair'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenObtainPair'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenObtainPair'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenObtainPair'
+          description: ''
+  /api/v1/auth/token/refresh/:
+    post:
+      operationId: api_v1_auth_token_refresh_create
+      description: |-
+        Takes a refresh type JSON web token and returns an access type JSON web
+        token if the refresh token is valid.
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenRefresh'
+          description: ''
+  /api/v1/clubs/:
+    get:
+      operationId: api_v1_clubs_list
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedClubList'
+          description: ''
+    post:
+      operationId: api_v1_clubs_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Club'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Club'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Club'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Club'
+          description: ''
+  /api/v1/clubs/{id}/:
+    get:
+      operationId: api_v1_clubs_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) club.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Club'
+          description: ''
+    put:
+      operationId: api_v1_clubs_update
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) club.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Club'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Club'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Club'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Club'
+          description: ''
+    patch:
+      operationId: api_v1_clubs_partial_update
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) club.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedClub'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedClub'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedClub'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Club'
+          description: ''
+    delete:
+      operationId: api_v1_clubs_destroy
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) club.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/clubs/{id}/overview/:
+    get:
+      operationId: api_v1_clubs_overview_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) club.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Club'
+          description: ''
+  /api/v1/configuration/:
+    get:
+      operationId: api_v1_configuration_retrieve
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformSettings'
+          description: ''
+    patch:
+      operationId: api_v1_configuration_partial_update
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedPlatformSettings'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedPlatformSettings'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedPlatformSettings'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformSettings'
+          description: ''
+  /api/v1/dashboard/:
+    get:
+      operationId: api_v1_dashboard_retrieve
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/v1/deposits/:
+    get:
+      operationId: api_v1_deposits_list
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDepositList'
+          description: ''
+    post:
+      operationId: api_v1_deposits_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Deposit'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Deposit'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Deposit'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deposit'
+          description: ''
+  /api/v1/deposits/{id}/:
+    get:
+      operationId: api_v1_deposits_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) deposit.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deposit'
+          description: ''
+  /api/v1/deposits/{id}/decide/:
+    post:
+      operationId: api_v1_deposits_decide_create
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) deposit.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Deposit'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Deposit'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Deposit'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deposit'
+          description: ''
+  /api/v1/disputes/:
+    get:
+      operationId: api_v1_disputes_list
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDisputeList'
+          description: ''
+    post:
+      operationId: api_v1_disputes_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Dispute'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Dispute'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Dispute'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dispute'
+          description: ''
+  /api/v1/disputes/{id}/:
+    get:
+      operationId: api_v1_disputes_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) dispute.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dispute'
+          description: ''
+  /api/v1/disputes/{id}/resolve/:
+    post:
+      operationId: api_v1_disputes_resolve_create
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) dispute.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Dispute'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Dispute'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Dispute'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dispute'
+          description: ''
+  /api/v1/health/:
+    get:
+      operationId: api_v1_health_retrieve
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/v1/invitations/:
+    get:
+      operationId: api_v1_invitations_list
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedInvitationList'
+          description: ''
+    post:
+      operationId: api_v1_invitations_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Invitation'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Invitation'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Invitation'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+          description: ''
+  /api/v1/invitations/{id}/:
+    get:
+      operationId: api_v1_invitations_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) invitation.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+          description: ''
+  /api/v1/invitations/{id}/cancel/:
+    post:
+      operationId: api_v1_invitations_cancel_create
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) invitation.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Invitation'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Invitation'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Invitation'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+          description: ''
+  /api/v1/loans/:
+    get:
+      operationId: api_v1_loans_list
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedLoanList'
+          description: ''
+    post:
+      operationId: api_v1_loans_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Loan'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+          description: ''
+  /api/v1/loans/{id}/:
+    get:
+      operationId: api_v1_loans_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) loan.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+          description: ''
+  /api/v1/loans/{id}/decide/:
+    post:
+      operationId: api_v1_loans_decide_create
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) loan.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Loan'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+          description: ''
+  /api/v1/loans/{id}/disburse/:
+    post:
+      operationId: api_v1_loans_disburse_create
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) loan.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Loan'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+          description: ''
+  /api/v1/loans/{id}/fund/:
+    post:
+      operationId: api_v1_loans_fund_create
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) loan.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Loan'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+          description: ''
+  /api/v1/loans/{id}/funding-forecast/:
+    get:
+      operationId: api_v1_loans_funding_forecast_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) loan.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+          description: ''
+  /api/v1/loans/{id}/record-payment/:
+    post:
+      operationId: api_v1_loans_record_payment_create
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) loan.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Loan'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+          description: ''
+  /api/v1/loans/{id}/schedule/:
+    post:
+      operationId: api_v1_loans_schedule_create
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) loan.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Loan'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+          description: ''
+  /api/v1/loans/simulate/:
+    post:
+      operationId: api_v1_loans_simulate_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Loan'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Loan'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+          description: ''
+  /api/v1/memberships/:
+    get:
+      operationId: api_v1_memberships_list
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedMembershipList'
+          description: ''
+    post:
+      operationId: api_v1_memberships_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Membership'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Membership'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Membership'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+          description: ''
+  /api/v1/memberships/{id}/:
+    get:
+      operationId: api_v1_memberships_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) membership.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+          description: ''
+    put:
+      operationId: api_v1_memberships_update
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) membership.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Membership'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Membership'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Membership'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+          description: ''
+    patch:
+      operationId: api_v1_memberships_partial_update
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) membership.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedMembership'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedMembership'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedMembership'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+          description: ''
+    delete:
+      operationId: api_v1_memberships_destroy
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) membership.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/memberships/{id}/decide/:
+    post:
+      operationId: api_v1_memberships_decide_create
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) membership.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Membership'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Membership'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Membership'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+          description: ''
+  /api/v1/messages/:
+    get:
+      operationId: api_v1_messages_list
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedClubMessageList'
+          description: ''
+    post:
+      operationId: api_v1_messages_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClubMessage'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ClubMessage'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ClubMessage'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClubMessage'
+          description: ''
+  /api/v1/messages/conversations/:
+    get:
+      operationId: api_v1_messages_conversations_retrieve
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClubMessage'
+          description: ''
+  /api/v1/messages/mark-read/:
+    post:
+      operationId: api_v1_messages_mark_read_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClubMessage'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ClubMessage'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ClubMessage'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClubMessage'
+          description: ''
+  /api/v1/notifications/:
+    get:
+      operationId: api_v1_notifications_list
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedNotificationList'
+          description: ''
+  /api/v1/notifications/{id}/:
+    get:
+      operationId: api_v1_notifications_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) notification.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+          description: ''
+  /api/v1/notifications/{id}/read/:
+    post:
+      operationId: api_v1_notifications_read_create
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) notification.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Notification'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Notification'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Notification'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+          description: ''
+  /api/v1/notifications/read-all/:
+    post:
+      operationId: api_v1_notifications_read_all_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Notification'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Notification'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Notification'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+          description: ''
+  /api/v1/reports/export.csv:
+    get:
+      operationId: api_v1_reports_export.csv_retrieve
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+          description: ''
+  /api/v1/reports/summary/:
+    get:
+      operationId: api_v1_reports_summary_retrieve
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/v1/users/:
+    get:
+      operationId: api_v1_users_list
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedUserList'
+          description: ''
+    post:
+      operationId: api_v1_users_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManagedUser'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ManagedUser'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ManagedUser'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedUser'
+          description: ''
+  /api/v1/users/{id}/:
+    get:
+      operationId: api_v1_users_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: Un(une) valeur entière unique identifiant ce(cette) utilisateur.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+          description: ''
+    put:
+      operationId: api_v1_users_update
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: Un(une) valeur entière unique identifiant ce(cette) utilisateur.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManagedUserUpdate'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ManagedUserUpdate'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ManagedUserUpdate'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedUserUpdate'
+          description: ''
+    patch:
+      operationId: api_v1_users_partial_update
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: Un(une) valeur entière unique identifiant ce(cette) utilisateur.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedManagedUserUpdate'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedManagedUserUpdate'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedManagedUserUpdate'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedUserUpdate'
+          description: ''
+    delete:
+      operationId: api_v1_users_destroy
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: Un(une) valeur entière unique identifiant ce(cette) utilisateur.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/users/{id}/verify-identity/:
+    post:
+      operationId: api_v1_users_verify_identity_create
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: Un(une) valeur entière unique identifiant ce(cette) utilisateur.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/User'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/User'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/User'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+          description: ''
+  /api/v1/withdrawals/:
+    get:
+      operationId: api_v1_withdrawals_list
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: Un numéro de page de l'ensemble des résultats.
+        schema:
+          type: integer
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedWithdrawalList'
+          description: ''
+    post:
+      operationId: api_v1_withdrawals_create
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Withdrawal'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Withdrawal'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Withdrawal'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Withdrawal'
+          description: ''
+  /api/v1/withdrawals/{id}/:
+    get:
+      operationId: api_v1_withdrawals_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) withdrawal.
+        required: true
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Withdrawal'
+          description: ''
+  /api/v1/withdrawals/{id}/decide/:
+    post:
+      operationId: api_v1_withdrawals_decide_create
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: Un(une) Chaîne UUID identifiant ce(cette) withdrawal.
+        required: true
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Withdrawal'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Withdrawal'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Withdrawal'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Withdrawal'
+          description: ''
+components:
+  schemas:
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        actor_name:
+          type: string
+          readOnly: true
+        action:
+          type: string
+          maxLength: 80
+        object_type:
+          type: string
+          maxLength: 80
+        object_id:
+          type: string
+          maxLength: 64
+        club:
+          type: string
+          format: uuid
+          nullable: true
+        old_values: {}
+        new_values: {}
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - action
+      - actor_name
+      - created_at
+      - id
+      - object_id
+      - object_type
+    BlankEnum:
+      enum:
+      - ''
+    Club:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          maxLength: 120
+        description:
+          type: string
+        zone:
+          type: string
+          maxLength: 120
+        currency:
+          type: string
+          maxLength: 3
+        leader:
+          type: integer
+        leader_name:
+          type: string
+          readOnly: true
+        status:
+          $ref: '#/components/schemas/ClubStatusEnum'
+        interest_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+        penalty_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+        platform_fee_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+        min_loan:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        max_loan:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        min_duration_months:
+          type: integer
+          maximum: 9223372036854775807
+          minimum: 0
+          format: int64
+        max_duration_months:
+          type: integer
+          maximum: 9223372036854775807
+          minimum: 0
+          format: int64
+        withdrawal_notice_days:
+          type: integer
+          maximum: 9223372036854775807
+          minimum: 0
+          format: int64
+        member_count:
+          type: integer
+          readOnly: true
+        finances:
+          type: object
+          additionalProperties:
+            type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - finances
+      - id
+      - leader
+      - leader_name
+      - member_count
+      - name
+      - zone
+    ClubMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        club:
+          type: string
+          format: uuid
+        club_name:
+          type: string
+          readOnly: true
+        sender_id:
+          type: integer
+          readOnly: true
+        sender_name:
+          type: string
+          readOnly: true
+        recipient:
+          type: integer
+          nullable: true
+        kind:
+          $ref: '#/components/schemas/KindEnum'
+        body:
+          type: string
+          maxLength: 2000
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - body
+      - club
+      - club_name
+      - created_at
+      - id
+      - sender_id
+      - sender_name
+      - updated_at
+    ClubStatusEnum:
+      enum:
+      - draft
+      - active
+      - suspended
+      - frozen
+      - archived
+      type: string
+      description: |-
+        * `draft` - Brouillon
+        * `active` - Actif
+        * `suspended` - Suspendu
+        * `frozen` - Gele
+        * `archived` - Archive
+    Deposit:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        reference:
+          type: string
+          readOnly: true
+        club:
+          type: string
+          format: uuid
+        club_name:
+          type: string
+          readOnly: true
+        lender:
+          type: integer
+        lender_name:
+          type: string
+          readOnly: true
+        amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        currency:
+          type: string
+          maxLength: 3
+        payment_method:
+          type: string
+          maxLength: 40
+        provider_reference:
+          type: string
+          maxLength: 100
+        proof:
+          type: string
+          format: uri
+        status:
+          allOf:
+          - $ref: '#/components/schemas/DepositStatusEnum'
+          readOnly: true
+        decision_reason:
+          type: string
+          readOnly: true
+        validated_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - amount
+      - club
+      - club_name
+      - created_at
+      - decision_reason
+      - id
+      - lender
+      - lender_name
+      - reference
+      - status
+      - validated_at
+    DepositStatusEnum:
+      enum:
+      - draft
+      - pending
+      - validated
+      - rejected
+      - cancelled
+      type: string
+      description: |-
+        * `draft` - Brouillon
+        * `pending` - En attente
+        * `validated` - Valide
+        * `rejected` - Refuse
+        * `cancelled` - Annule
+    Dispute:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        club:
+          type: string
+          format: uuid
+        opened_by:
+          type: integer
+          readOnly: true
+        opened_by_name:
+          type: string
+          readOnly: true
+        assigned_to:
+          type: integer
+          nullable: true
+        assigned_to_name:
+          type: string
+          readOnly: true
+        operation_type:
+          type: string
+          maxLength: 32
+        operation_id:
+          type: string
+          maxLength: 64
+        subject:
+          type: string
+          maxLength: 160
+        description:
+          type: string
+        status:
+          allOf:
+          - $ref: '#/components/schemas/DisputeStatusEnum'
+          readOnly: true
+        frozen:
+          type: boolean
+          readOnly: true
+        decision:
+          type: string
+          readOnly: true
+        closed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - assigned_to_name
+      - closed_at
+      - club
+      - created_at
+      - decision
+      - description
+      - frozen
+      - id
+      - opened_by
+      - opened_by_name
+      - operation_type
+      - status
+      - subject
+    DisputeStatusEnum:
+      enum:
+      - open
+      - review
+      - resolved
+      - rejected
+      - closed
+      type: string
+      description: |-
+        * `open` - Ouvert
+        * `review` - En analyse
+        * `resolved` - Resolu
+        * `rejected` - Rejete
+        * `closed` - Clos
+    Installment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        number:
+          type: integer
+          maximum: 9223372036854775807
+          minimum: 0
+          format: int64
+        due_date:
+          type: string
+          format: date
+        principal_due:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        interest_due:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        fee_due:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        penalty_due:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        total_due:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+          readOnly: true
+        paid_amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        status:
+          $ref: '#/components/schemas/InstallmentStatusEnum'
+      required:
+      - due_date
+      - id
+      - interest_due
+      - number
+      - principal_due
+      - total_due
+    InstallmentStatusEnum:
+      enum:
+      - upcoming
+      - due
+      - partial
+      - paid
+      - late
+      - cancelled
+      type: string
+      description: |-
+        * `upcoming` - A venir
+        * `due` - Due
+        * `partial` - Partielle
+        * `paid` - Payee
+        * `late` - En retard
+        * `cancelled` - Annulee
+    Invitation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        token:
+          type: string
+          format: uuid
+          readOnly: true
+        club:
+          type: string
+          format: uuid
+          nullable: true
+        club_name:
+          type: string
+          readOnly: true
+        phone:
+          type: string
+          maxLength: 24
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        role:
+          $ref: '#/components/schemas/Role47bEnum'
+        membership_role:
+          oneOf:
+          - $ref: '#/components/schemas/MembershipRoleEnum'
+          - $ref: '#/components/schemas/BlankEnum'
+        status:
+          allOf:
+          - $ref: '#/components/schemas/InvitationStatusEnum'
+          readOnly: true
+        created_by_name:
+          type: string
+          readOnly: true
+        expires_at:
+          type: string
+          format: date-time
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - club_name
+      - created_at
+      - created_by_name
+      - expires_at
+      - id
+      - phone
+      - role
+      - status
+      - token
+    InvitationStatusEnum:
+      enum:
+      - pending
+      - accepted
+      - cancelled
+      - expired
+      type: string
+      description: |-
+        * `pending` - En attente
+        * `accepted` - Acceptee
+        * `cancelled` - Annulee
+        * `expired` - Expiree
+    KindEnum:
+      enum:
+      - text
+      - announcement
+      - private
+      type: string
+      description: |-
+        * `text` - Message
+        * `announcement` - Annonce
+        * `private` - Prive
+    Loan:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        reference:
+          type: string
+          readOnly: true
+        club:
+          type: string
+          format: uuid
+        club_name:
+          type: string
+          readOnly: true
+        borrower:
+          type: integer
+          readOnly: true
+        borrower_name:
+          type: string
+          readOnly: true
+        purpose:
+          type: string
+          maxLength: 240
+        estimated_income:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        guarantors:
+          type: string
+        amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        currency:
+          type: string
+          readOnly: true
+        duration_months:
+          type: integer
+          maximum: 9223372036854775807
+          minimum: 0
+          format: int64
+        interest_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+          readOnly: true
+        fee_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+          readOnly: true
+        interest_total:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+          readOnly: true
+        fee_total:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+          readOnly: true
+        total_due:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+          readOnly: true
+        total_paid:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+          readOnly: true
+        balance:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/LoanStatusEnum'
+          readOnly: true
+        decision_reason:
+          type: string
+          readOnly: true
+        approved_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        disbursed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        funding_completed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        scheduled_disbursement_date:
+          type: string
+          format: date
+          readOnly: true
+          nullable: true
+        funded_amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+          readOnly: true
+        funding_remaining:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+          readOnly: true
+        installments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Installment'
+          readOnly: true
+        fundings:
+          type: array
+          items:
+            $ref: '#/components/schemas/LoanFunding'
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - amount
+      - approved_at
+      - balance
+      - borrower
+      - borrower_name
+      - club
+      - club_name
+      - created_at
+      - currency
+      - decision_reason
+      - disbursed_at
+      - duration_months
+      - fee_rate
+      - fee_total
+      - funded_amount
+      - funding_completed_at
+      - funding_remaining
+      - fundings
+      - id
+      - installments
+      - interest_rate
+      - interest_total
+      - purpose
+      - reference
+      - scheduled_disbursement_date
+      - status
+      - total_due
+      - total_paid
+    LoanFunding:
+      type: object
+      properties:
+        lender:
+          type: integer
+        lender_name:
+          type: string
+          readOnly: true
+        amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        expected_gain:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        principal_repaid:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        interest_earned:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+      required:
+      - amount
+      - lender
+      - lender_name
+    LoanStatusEnum:
+      enum:
+      - draft
+      - submitted
+      - review
+      - approved
+      - rejected
+      - disbursed
+      - current
+      - late
+      - repaid
+      - disputed
+      - cancelled
+      type: string
+      description: |-
+        * `draft` - Brouillon
+        * `submitted` - Soumis
+        * `review` - En etude
+        * `approved` - Valide
+        * `rejected` - Refuse
+        * `disbursed` - Decaisse
+        * `current` - En cours
+        * `late` - En retard
+        * `repaid` - Rembourse
+        * `disputed` - Litigieux
+        * `cancelled` - Annule
+    ManagedUser:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        phone:
+          type: string
+          maxLength: 24
+        first_name:
+          type: string
+          title: Prénom
+          maxLength: 150
+        last_name:
+          type: string
+          title: Nom
+          maxLength: 150
+        name:
+          type: string
+          readOnly: true
+        role:
+          $ref: '#/components/schemas/Role47bEnum'
+        password:
+          type: string
+          writeOnly: true
+        club:
+          type: string
+          format: uuid
+          writeOnly: true
+        membership_role:
+          allOf:
+          - $ref: '#/components/schemas/MembershipRoleEnum'
+          writeOnly: true
+        kyc_verified:
+          type: boolean
+          readOnly: true
+        is_active:
+          type: boolean
+          readOnly: true
+          title: Actif
+          description: Précise si l’utilisateur doit être considéré comme actif. Décochez
+            ceci plutôt que de supprimer le compte.
+      required:
+      - email
+      - id
+      - is_active
+      - kyc_verified
+      - name
+      - password
+      - phone
+    ManagedUserUpdate:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        phone:
+          type: string
+          maxLength: 24
+        first_name:
+          type: string
+          title: Prénom
+          maxLength: 150
+        last_name:
+          type: string
+          title: Nom
+          maxLength: 150
+        role:
+          $ref: '#/components/schemas/Role47bEnum'
+        kyc_verified:
+          type: boolean
+        is_active:
+          type: boolean
+          title: Actif
+          description: Précise si l’utilisateur doit être considéré comme actif. Décochez
+            ceci plutôt que de supprimer le compte.
+      required:
+      - email
+      - phone
+    Membership:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        club:
+          type: string
+          format: uuid
+        club_name:
+          type: string
+          readOnly: true
+        user:
+          type: integer
+        user_detail:
+          allOf:
+          - $ref: '#/components/schemas/User'
+          readOnly: true
+        role:
+          $ref: '#/components/schemas/Role3e6Enum'
+        status:
+          allOf:
+          - $ref: '#/components/schemas/MembershipStatusEnum'
+          readOnly: true
+        decision_reason:
+          type: string
+          readOnly: true
+        reviewed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - club
+      - club_name
+      - created_at
+      - decision_reason
+      - id
+      - reviewed_at
+      - role
+      - status
+      - user
+      - user_detail
+    MembershipRoleEnum:
+      enum:
+      - leader
+      - lender
+      - borrower
+      - treasurer
+      type: string
+      description: |-
+        * `leader` - Chef
+        * `lender` - Preteur
+        * `borrower` - Emprunteur
+        * `treasurer` - Tresorier
+    MembershipStatusEnum:
+      enum:
+      - pending
+      - active
+      - blocked
+      - suspended
+      - left
+      type: string
+      description: |-
+        * `pending` - En attente
+        * `active` - Actif
+        * `blocked` - Bloque
+        * `suspended` - Suspendu
+        * `left` - Sorti
+    Notification:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          maxLength: 120
+        message:
+          type: string
+        kind:
+          type: string
+          maxLength: 40
+        read_at:
+          type: string
+          format: date-time
+          nullable: true
+        data: {}
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - id
+      - message
+      - title
+    OTPRequest:
+      type: object
+      properties:
+        phone:
+          type: string
+          maxLength: 24
+        purpose:
+          $ref: '#/components/schemas/PurposeEnum'
+      required:
+      - phone
+      - purpose
+    OTPVerify:
+      type: object
+      properties:
+        challenge_id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          maxLength: 6
+          minLength: 6
+      required:
+      - challenge_id
+      - code
+    PaginatedAuditLogList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLog'
+    PaginatedClubList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Club'
+    PaginatedClubMessageList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClubMessage'
+    PaginatedDepositList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Deposit'
+    PaginatedDisputeList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Dispute'
+    PaginatedInvitationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Invitation'
+    PaginatedLoanList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Loan'
+    PaginatedMembershipList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Membership'
+    PaginatedNotificationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notification'
+    PaginatedUserList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+    PaginatedWithdrawalList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Withdrawal'
+    PatchedClub:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          maxLength: 120
+        description:
+          type: string
+        zone:
+          type: string
+          maxLength: 120
+        currency:
+          type: string
+          maxLength: 3
+        leader:
+          type: integer
+        leader_name:
+          type: string
+          readOnly: true
+        status:
+          $ref: '#/components/schemas/ClubStatusEnum'
+        interest_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+        penalty_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+        platform_fee_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+        min_loan:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        max_loan:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        min_duration_months:
+          type: integer
+          maximum: 9223372036854775807
+          minimum: 0
+          format: int64
+        max_duration_months:
+          type: integer
+          maximum: 9223372036854775807
+          minimum: 0
+          format: int64
+        withdrawal_notice_days:
+          type: integer
+          maximum: 9223372036854775807
+          minimum: 0
+          format: int64
+        member_count:
+          type: integer
+          readOnly: true
+        finances:
+          type: object
+          additionalProperties:
+            type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+    PatchedManagedUserUpdate:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        phone:
+          type: string
+          maxLength: 24
+        first_name:
+          type: string
+          title: Prénom
+          maxLength: 150
+        last_name:
+          type: string
+          title: Nom
+          maxLength: 150
+        role:
+          $ref: '#/components/schemas/Role47bEnum'
+        kyc_verified:
+          type: boolean
+        is_active:
+          type: boolean
+          title: Actif
+          description: Précise si l’utilisateur doit être considéré comme actif. Décochez
+            ceci plutôt que de supprimer le compte.
+    PatchedMembership:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        club:
+          type: string
+          format: uuid
+        club_name:
+          type: string
+          readOnly: true
+        user:
+          type: integer
+        user_detail:
+          allOf:
+          - $ref: '#/components/schemas/User'
+          readOnly: true
+        role:
+          $ref: '#/components/schemas/Role3e6Enum'
+        status:
+          allOf:
+          - $ref: '#/components/schemas/MembershipStatusEnum'
+          readOnly: true
+        decision_reason:
+          type: string
+          readOnly: true
+        reviewed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+    PatchedPlatformSettings:
+      type: object
+      properties:
+        platform_name:
+          type: string
+          maxLength: 80
+        default_currency:
+          type: string
+          maxLength: 3
+        default_interest_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+        default_penalty_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+        default_commission_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+        max_loan:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        require_double_validation:
+          type: boolean
+        kyc_required:
+          type: boolean
+        maintenance_mode:
+          type: boolean
+        support_phone:
+          type: string
+          maxLength: 24
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+    PatchedUser:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        phone:
+          type: string
+          maxLength: 24
+        first_name:
+          type: string
+          title: Prénom
+          maxLength: 150
+        last_name:
+          type: string
+          title: Nom
+          maxLength: 150
+        name:
+          type: string
+          readOnly: true
+        role:
+          allOf:
+          - $ref: '#/components/schemas/Role47bEnum'
+          readOnly: true
+        current_profile:
+          type: string
+          readOnly: true
+        available_profiles:
+          type: array
+          items:
+            type: string
+          readOnly: true
+        kyc_verified:
+          type: boolean
+          readOnly: true
+        avatar:
+          type: string
+          format: uri
+        identity_document:
+          type: string
+          format: uri
+        selfie:
+          type: string
+          format: uri
+        is_active:
+          type: boolean
+          title: Actif
+          description: Précise si l’utilisateur doit être considéré comme actif. Décochez
+            ceci plutôt que de supprimer le compte.
+    PlatformSettings:
+      type: object
+      properties:
+        platform_name:
+          type: string
+          maxLength: 80
+        default_currency:
+          type: string
+          maxLength: 3
+        default_interest_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+        default_penalty_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+        default_commission_rate:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,2})?$
+        max_loan:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        require_double_validation:
+          type: boolean
+        kyc_required:
+          type: boolean
+        maintenance_mode:
+          type: boolean
+        support_phone:
+          type: string
+          maxLength: 24
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - updated_at
+    PurposeEnum:
+      enum:
+      - register
+      - login
+      - recovery
+      type: string
+      description: |-
+        * `register` - Inscription
+        * `login` - Connexion
+        * `recovery` - Recuperation
+    Register:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        phone:
+          type: string
+          maxLength: 24
+        first_name:
+          type: string
+          title: Prénom
+          maxLength: 150
+        last_name:
+          type: string
+          title: Nom
+          maxLength: 150
+        password:
+          type: string
+          writeOnly: true
+        otp_id:
+          type: string
+          format: uuid
+          writeOnly: true
+      required:
+      - email
+      - otp_id
+      - password
+      - phone
+    Role3e6Enum:
+      enum:
+      - leader
+      - lender
+      - borrower
+      - treasurer
+      type: string
+      description: |-
+        * `leader` - Chef
+        * `lender` - Preteur
+        * `borrower` - Emprunteur
+        * `treasurer` - Tresorier
+    Role47bEnum:
+      enum:
+      - admin
+      - leader
+      - lender
+      - borrower
+      - mediator
+      type: string
+      description: |-
+        * `admin` - Administrateur
+        * `leader` - Chef de club
+        * `lender` - Preteur
+        * `borrower` - Emprunteur
+        * `mediator` - Mediateur
+    TokenObtainPair:
+      type: object
+      properties:
+        phone:
+          type: string
+          writeOnly: true
+        password:
+          type: string
+          writeOnly: true
+        access:
+          type: string
+          readOnly: true
+        refresh:
+          type: string
+          readOnly: true
+      required:
+      - access
+      - password
+      - phone
+      - refresh
+    TokenRefresh:
+      type: object
+      properties:
+        access:
+          type: string
+          readOnly: true
+        refresh:
+          type: string
+      required:
+      - access
+      - refresh
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        phone:
+          type: string
+          maxLength: 24
+        first_name:
+          type: string
+          title: Prénom
+          maxLength: 150
+        last_name:
+          type: string
+          title: Nom
+          maxLength: 150
+        name:
+          type: string
+          readOnly: true
+        role:
+          allOf:
+          - $ref: '#/components/schemas/Role47bEnum'
+          readOnly: true
+        current_profile:
+          type: string
+          readOnly: true
+        available_profiles:
+          type: array
+          items:
+            type: string
+          readOnly: true
+        kyc_verified:
+          type: boolean
+          readOnly: true
+        avatar:
+          type: string
+          format: uri
+        identity_document:
+          type: string
+          format: uri
+        selfie:
+          type: string
+          format: uri
+        is_active:
+          type: boolean
+          title: Actif
+          description: Précise si l’utilisateur doit être considéré comme actif. Décochez
+            ceci plutôt que de supprimer le compte.
+      required:
+      - available_profiles
+      - current_profile
+      - email
+      - id
+      - kyc_verified
+      - name
+      - phone
+      - role
+    Withdrawal:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        reference:
+          type: string
+          readOnly: true
+        club:
+          type: string
+          format: uuid
+        lender:
+          type: integer
+          readOnly: true
+        lender_name:
+          type: string
+          readOnly: true
+        amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,14}(?:\.\d{0,2})?$
+        currency:
+          type: string
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/WithdrawalStatusEnum'
+          readOnly: true
+        decision_reason:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - amount
+      - club
+      - created_at
+      - currency
+      - decision_reason
+      - id
+      - lender
+      - lender_name
+      - reference
+      - status
+    WithdrawalStatusEnum:
+      enum:
+      - submitted
+      - review
+      - approved
+      - rejected
+      - paid
+      - cancelled
+      type: string
+      description: |-
+        * `submitted` - Soumise
+        * `review` - En etude
+        * `approved` - Validee
+        * `rejected` - Refusee
+        * `paid` - Payee
+        * `cancelled` - Annulee
+  securitySchemes:
+    jwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

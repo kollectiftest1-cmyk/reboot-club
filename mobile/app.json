@@ -1,0 +1,39 @@
+{
+  "expo": {
+    "name": "REBOOT CLUB",
+    "slug": "reboot-club",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#123C33"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "club.reboot.mobile"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#123C33"
+      },
+      "package": "club.reboot.mobile",
+      "softwareKeyboardLayoutMode": "resize"
+    },
+    "web": {
+      "favicon": "./assets/icon.png"
+    },
+    "plugins": [
+      ["expo-secure-store", {"configureAndroidBackup": true, "faceIDPermission": "Autoriser REBOOT CLUB à utiliser Face ID."}],
+      ["expo-navigation-bar", {"backgroundColor": "#F4F7F5", "barStyle": "dark", "visibility": "visible", "position": "relative"}],
+      ["expo-image-picker", {"photosPermission": "Autoriser REBOOT CLUB a joindre vos pieces KYC.", "cameraPermission": "Autoriser REBOOT CLUB a prendre votre selfie KYC.", "microphonePermission": false}]
+    ],
+    "extra": {
+      "apiUrl": "http://10.0.2.2:8000/api/v1"
+    }
+  }
+}

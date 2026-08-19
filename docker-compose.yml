@@ -1,0 +1,31 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: reboot_club
+      POSTGRES_USER: reboot
+      POSTGRES_PASSWORD: reboot-local-only
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reboot -d reboot_club"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    environment:
+      DEBUG: "true"
+      SECRET_KEY: local-docker-secret
+      ALLOWED_HOSTS: "*"
+      DATABASE_URL: postgresql://reboot:reboot-local-only@db:5432/reboot_club
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sh -c "python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3"
+
+volumes:
+  postgres_data:
