@@ -7,12 +7,12 @@ import { Platform } from "react-native";
 function resolveApiUrl() {
     const configured = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, "");
     if (configured) return configured;
-    // if (Platform.OS === "web") return "https://rebootclub.daianapilot.com/api/v1";
-    if (Platform.OS === "web") return "https://localhost:8000/api/v1";
+    if (Platform.OS === "web") return "https://rebootclub.daianapilot.com/api/v1";
+    // if (Platform.OS === "web") return "https://localhost:8000/api/v1";
     const hostUri = Constants.expoConfig?.hostUri || Constants.manifest2?.extra?.expoClient?.hostUri;
     const host = hostUri?.split(":")[0];
-    // return host ? `https://rebootclub.daianapilot.com/api/v1` : "https://rebootclub.daianapilot.com/api/v1";
-    return host ? `https://10.238.29.253:8000/api/v1` : "https://10.238.29.253:8000/api/v1";
+    return host ? `https://rebootclub.daianapilot.com/api/v1` : "https://rebootclub.daianapilot.com/api/v1";
+    // return host ? `https://10.238.29.253:8000/api/v1` : "https://10.238.29.253:8000/api/v1";
 }
 
 export const API_URL = resolveApiUrl();
