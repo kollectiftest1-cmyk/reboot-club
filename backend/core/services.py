@@ -265,7 +265,7 @@ def submit_loan(loan, actor):
 
 @transaction.atomic
 def approve_loan(loan, actor, approve=True, reason="", admin_as_leader=False):
-    loan = Loan.objects.select_for_update().select_related("club", "borrower").get(pk=loan.pk)
+    loan = Loan.objects.select_for_update(of=("self",)).select_related("club", "borrower").get(pk=loan.pk)
     if loan.status not in [Loan.Status.SUBMITTED, Loan.Status.REVIEW]:
         raise ValidationError("Cette demande ne peut plus etre traitee.")
     admin_decision = is_platform_admin(actor)
@@ -357,7 +357,7 @@ def lender_available(club, lender):
 def fund_loan(loan, lender, amount, actor=None):
     """Soumet un placement. Il reste en attente jusqu'a validation administrateur."""
     actor = actor or lender
-    loan = Loan.objects.select_for_update().select_related("club", "borrower", "club__leader").get(pk=loan.pk)
+    loan = Loan.objects.select_for_update(of=("self",)).select_related("club", "borrower", "club__leader").get(pk=loan.pk)
     if not lender.has_valid_kyc:
         raise ValidationError("Le KYC du preteur doit etre valide avant un placement.")
     if loan.status != Loan.Status.APPROVED:
@@ -388,7 +388,7 @@ def review_funding(funding, actor, approve=True, reason=""):
     """Validation administrateur d'un placement : sans elle le pret n'est pas finance."""
     if not is_platform_admin(actor):
         raise ValidationError("La validation des placements est reservee a l'administrateur.")
-    funding = LoanFunding.objects.select_for_update().select_related("loan", "lender", "loan__club").get(pk=funding.pk)
+    funding = LoanFunding.objects.select_for_update(of=("self",)).select_related("loan", "lender", "loan__club").get(pk=funding.pk)
     loan = Loan.objects.select_for_update().get(pk=funding.loan_id)
     if funding.pending_amount <= 0:
         raise ValidationError("Ce placement n'est plus en attente de validation.")
@@ -445,7 +445,7 @@ def disburse_loan(loan, actor):
     """Decaissement : reserve a l'administrateur."""
     if not is_platform_admin(actor):
         raise ValidationError("Seul l'administrateur peut decaisser un pret.")
-    loan = Loan.objects.select_for_update().select_related("club", "borrower").get(pk=loan.pk)
+    loan = Loan.objects.select_for_update(of=("self",)).select_related("club", "borrower").get(pk=loan.pk)
     if not loan.borrower.has_valid_kyc:
         raise ValidationError("Le KYC de l'emprunteur doit rester valide avant le decaissement.")
     if loan.status != Loan.Status.APPROVED:
@@ -488,7 +488,7 @@ def disburse_loan(loan, actor):
 @transaction.atomic
 def record_repayment(loan, actor, amount, payment_method="cash", borrower=None):
     """Encaissement d'une echeance : administrateur ou mandataire designe."""
-    loan = Loan.objects.select_for_update().select_related("club", "borrower", "club__leader").get(pk=loan.pk)
+    loan = Loan.objects.select_for_update(of=("self",)).select_related("club", "borrower", "club__leader").get(pk=loan.pk)
     if not can_collect(actor, loan):
         raise ValidationError("Seul l'administrateur ou le mandataire designe peut encaisser ce pret.")
     if loan.status not in ACTIVE_LOAN_STATUSES:
@@ -579,7 +579,7 @@ def record_repayment(loan, actor, amount, payment_method="cash", borrower=None):
 def process_due_installments(today=None):
     today = today or timezone.localdate()
     counters = {"due": 0, "late": 0, "reminders": 0}
-    installments = Installment.objects.select_for_update().select_related("loan", "loan__club", "loan__borrower").filter(
+    installments = Installment.objects.select_for_update(of=("self",)).select_related("loan", "loan__club", "loan__borrower").filter(
         status__in=[Installment.Status.UPCOMING, Installment.Status.DUE, Installment.Status.PARTIAL, Installment.Status.LATE]
     )
     for installment in installments:
