@@ -254,20 +254,29 @@ def collective_is_ready(loan):
 
 @transaction.atomic
 def submit_loan(loan, actor):
-    """Passe un pret en `submitted` et notifie chef de club + administrateurs."""
+    """Passe un pret en `submitted` et le transmet d'abord au chef du club."""
     loan.status = Loan.Status.SUBMITTED
     loan.save(update_fields=["status", "updated_at"])
     audit(actor, "loan.submitted", loan, new={"amount": str(loan.amount), "collective": loan.is_collective})
-    for recipient in {item for item in {loan.club.leader, *platform_admins()} if item}:
-        notify(recipient, "Nouvelle demande de pret", f"{loan.borrower.display_name} demande {loan.amount} {loan.currency} dans {loan.club.name}.", "loan_review", {"loan": str(loan.id)})
+    if loan.club.leader:
+        notify(loan.club.leader, "Nouvelle demande de pret", f"{loan.borrower.display_name} demande {loan.amount} {loan.currency} dans {loan.club.name}.", "loan_review", {"loan": str(loan.id)})
     return loan
 
 
 @transaction.atomic
-def approve_loan(loan, actor, approve=True, reason=""):
+def approve_loan(loan, actor, approve=True, reason="", admin_as_leader=False):
     loan = Loan.objects.select_for_update().select_related("club", "borrower").get(pk=loan.pk)
     if loan.status not in [Loan.Status.SUBMITTED, Loan.Status.REVIEW]:
         raise ValidationError("Cette demande ne peut plus etre traitee.")
+    admin_decision = is_platform_admin(actor)
+    leader_decision = bool(
+        (loan.club.leader_id == actor.id and actor.current_profile == User.Role.LEADER) or
+        (admin_as_leader and admin_decision)
+    )
+    if loan.status == Loan.Status.SUBMITTED and not leader_decision:
+        raise ValidationError("Le chef du club doit valider cette demande avant l'administrateur.")
+    if loan.status == Loan.Status.REVIEW and not admin_decision:
+        raise ValidationError("La validation finale de cette demande est reservee a l'administrateur.")
     if not approve and not reason:
         raise ValidationError("Le motif de refus est obligatoire.")
     if approve and not loan.borrower.has_valid_kyc:
@@ -284,6 +293,20 @@ def approve_loan(loan, actor, approve=True, reason=""):
             raise ValidationError("La frequence de remboursement ne correspond pas a la duree du pret.")
         if loan.is_collective and not collective_is_ready(loan):
             raise ValidationError("Tous les co-emprunteurs doivent avoir accepte et le capital doit etre entierement reparti.")
+        if loan.status == Loan.Status.SUBMITTED:
+            loan.status = Loan.Status.REVIEW
+            loan.decision_reason = ""
+            loan.save(update_fields=["status", "decision_reason", "updated_at"])
+            action = "loan.leader_approved_by_admin" if admin_as_leader else "loan.leader_approved"
+            audit(actor, action, loan, new={"status": loan.status, "delegated": admin_as_leader})
+            recipients = {row.user for row in loan.borrowers.select_related("user")} or {loan.borrower}
+            for recipient in recipients:
+                title = "Etape du chef validee par l'administration" if admin_as_leader else "Accord du chef de club"
+                notify(recipient, title, f"La demande {loan.reference} attend maintenant la validation finale de l'administrateur.", "loan", {"loan": str(loan.id)})
+            for admin in platform_admins():
+                source = "L'administration a valide l'etape du chef pour" if admin_as_leader else f"Le chef de {loan.club.name} a valide"
+                notify(admin, "Pret a valider", f"{source} le pret {loan.reference}.", "loan_review", {"loan": str(loan.id)})
+            return loan
         costs = loan_cost_breakdown(loan.amount, loan.interest_rate, loan.fee_rate, loan.leader_commission_rate)
         loan.interest_total = costs["interest"]
         loan.fee_total = costs["fee"]
@@ -300,7 +323,7 @@ def approve_loan(loan, actor, approve=True, reason=""):
     audit(actor, f"loan.{loan.status}", loan, new={"status": loan.status, "total_due": str(loan.total_due)})
     recipients = {row.user for row in loan.borrowers.select_related("user")} or {loan.borrower}
     for recipient in recipients:
-        notify(recipient, "Demande de pret", f"La demande {loan.reference} est {loan.get_status_display().lower()}.", "loan", {"loan": str(loan.id)})
+        notify(recipient, "Decision sur le pret", f"La demande {loan.reference} est {loan.get_status_display().lower()}.", "loan", {"loan": str(loan.id)})
     if approve:
         for lender in User.objects.filter(lender_profile_status=User.LenderProfileStatus.ACTIVE, is_active=True):
             notify(lender, "Nouveau pret a financer", f"Le pret {loan.reference} recherche {loan.amount} {loan.currency}.", "funding", {"loan": str(loan.id)})
@@ -342,19 +365,16 @@ def fund_loan(loan, lender, amount, actor=None):
     if lender.lender_profile_status != User.LenderProfileStatus.ACTIVE:
         raise ValidationError("Un profil preteur global actif est obligatoire.")
     amount = money(amount)
-    if amount <= 0 or amount > loan.funding_open_amount:
-        raise ValidationError("Le montant doit etre positif et ne pas depasser le besoin restant.")
+    if amount <= 0 or amount > loan.amount:
+        raise ValidationError("Le montant doit etre positif et ne pas depasser le montant total du pret.")
     if amount > lender_total_available(lender):
         raise ValidationError("Votre capital libre est insuffisant.")
-    funding, _ = LoanFunding.objects.select_for_update().get_or_create(loan=loan, lender=lender, defaults={"amount": Decimal("0")})
-    funding.pending_amount += amount
-    funding.submitted_at = timezone.now()
-    funding.reviewed_at = None
-    funding.reviewed_by = None
-    funding.decision_reason = ""
-    funding.save(update_fields=["pending_amount", "submitted_at", "reviewed_at", "reviewed_by", "decision_reason", "updated_at"])
+    funding = LoanFunding.objects.create(
+        loan=loan, lender=lender, amount=Decimal("0"), pending_amount=amount,
+        submitted_at=timezone.now(), decision_reason="",
+    )
     audit(actor, "funding.submitted", funding, new={
-        "amount": str(amount), "pending_total": str(funding.pending_amount),
+        "amount": str(amount), "pending_total": str(amount),
         "lender": str(lender.id), "assisted": actor.id != lender.id,
     })
     for admin in platform_admins():
@@ -369,31 +389,48 @@ def review_funding(funding, actor, approve=True, reason=""):
     if not is_platform_admin(actor):
         raise ValidationError("La validation des placements est reservee a l'administrateur.")
     funding = LoanFunding.objects.select_for_update().select_related("loan", "lender", "loan__club").get(pk=funding.pk)
+    loan = Loan.objects.select_for_update().get(pk=funding.loan_id)
     if funding.pending_amount <= 0:
         raise ValidationError("Ce placement n'est plus en attente de validation.")
     if not approve and not reason:
         raise ValidationError("Le motif de refus est obligatoire.")
-    loan = funding.loan
     pending = funding.pending_amount
     if approve:
         if loan.status != Loan.Status.APPROVED:
             raise ValidationError("Ce pret n'est plus ouvert au financement.")
         if pending > loan.funding_remaining:
-            raise ValidationError("Le montant depasse le besoin restant du pret.")
-        funding.amount += pending
-        funding.expected_gain += money(loan.interest_total * pending / loan.amount) if loan.amount else Decimal("0")
+            approve = False
+            reason = f"Placement annule automatiquement : seulement {loan.funding_remaining} {loan.currency} reste disponible."
+        else:
+            funding.amount += pending
+            funding.expected_gain += money(loan.interest_total * pending / loan.amount) if loan.amount else Decimal("0")
     funding.pending_amount = Decimal("0")
     funding.reviewed_by = actor
     funding.reviewed_at = timezone.now()
     funding.decision_reason = reason
     funding.save(update_fields=["amount", "expected_gain", "pending_amount", "reviewed_by", "reviewed_at", "decision_reason", "updated_at"])
-    audit(actor, "funding.validated" if approve else "funding.rejected", funding, new={"amount": str(pending), "total": str(funding.amount)})
+    audit(actor, "funding.validated" if approve else "funding.rejected", funding, new={"amount": str(pending), "total": str(funding.amount), "reason": reason})
     notify(
         funding.lender, "Placement traite",
         f"Votre placement de {pending} {loan.currency} sur {loan.reference} est {'valide' if approve else 'refuse'}." + (f" Motif: {reason}" if reason else ""),
         "funding", {"loan": str(loan.id)},
     )
     loan.refresh_from_db()
+    if approve:
+        remaining = loan.funding_remaining
+        oversized = LoanFunding.objects.select_for_update().filter(
+            loan=loan, pending_amount__gt=remaining,
+        ).exclude(pk=funding.pk).select_related("lender")
+        for proposal in oversized:
+            cancelled_amount = proposal.pending_amount
+            cancellation_reason = f"Placement annule automatiquement : seulement {remaining} {loan.currency} reste disponible."
+            proposal.pending_amount = Decimal("0")
+            proposal.reviewed_by = actor
+            proposal.reviewed_at = timezone.now()
+            proposal.decision_reason = cancellation_reason
+            proposal.save(update_fields=["pending_amount", "reviewed_by", "reviewed_at", "decision_reason", "updated_at"])
+            audit(actor, "funding.auto_cancelled", proposal, new={"amount": str(cancelled_amount), "remaining": str(remaining), "reason": cancellation_reason})
+            notify(proposal.lender, "Placement annule", f"Votre placement de {cancelled_amount} {loan.currency} sur {loan.reference} est annule. {cancellation_reason}", "funding", {"loan": str(loan.id)})
     if approve and loan.funding_remaining == 0 and not loan.funding_completed_at:
         loan.funding_completed_at = timezone.now()
         loan.scheduled_disbursement_date = timezone.localdate() + timedelta(days=1)

@@ -50,14 +50,14 @@ export function AvatarViewer({ user, visible, onClose }) {
     const source = mediaUrl(user?.avatar || user?.selfie);
     const name = user?.name || `${user?.first_name || ""} ${user?.last_name || ""}`.trim() || user?.phone || "Membre";
     return <Modal visible={Boolean(visible)} transparent animationType="fade" statusBarTranslucent onRequestClose={onClose}>
-      <Pressable accessibilityRole="button" accessibilityLabel="Fermer la photo" onPress={onClose} style={styles.avatarViewerBackdrop}>
+      <SafeAreaView edges={["top", "bottom", "left", "right"]} style={styles.modalSafe}><Pressable accessibilityRole="button" accessibilityLabel="Fermer la photo" onPress={onClose} style={styles.avatarViewerBackdrop}>
         <Pressable onPress={event => event.stopPropagation()} style={styles.avatarViewerContent}>
           <Pressable accessibilityRole="button" accessibilityLabel="Fermer" onPress={onClose} style={styles.avatarViewerClose}><X size={22} color={colors.white}/></Pressable>
           {source ? <Image source={{ uri: source }} resizeMode="contain" style={styles.avatarViewerImage}/> : <View style={styles.avatarViewerFallback}><Text style={styles.avatarViewerInitials}>{name.split(" ").filter(Boolean).map(part => part[0]).join("").slice(0, 2).toUpperCase()}</Text></View>}
           <Text style={styles.avatarViewerName}>{name}</Text>
           <Text style={styles.avatarViewerHint}>Photo du profil client</Text>
         </Pressable>
-      </Pressable>
+      </Pressable></SafeAreaView>
     </Modal>;
 }
 
@@ -97,7 +97,7 @@ export function Select({ label, value, options, onChange, placeholder = "Selecti
       {hint ? <Text style={styles.selectHint}>{hint}</Text> : null}
       {error ? <Text style={styles.error}>{error}</Text> : null}
       <Modal visible={open} transparent animationType="fade" statusBarTranslucent onRequestClose={() => setOpen(false)}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Fermer" onPress={() => setOpen(false)} style={styles.selectBackdrop}>
+        <SafeAreaView edges={["top", "bottom", "left", "right"]} style={styles.modalSafe}><Pressable accessibilityRole="button" accessibilityLabel="Fermer" onPress={() => setOpen(false)} style={styles.selectBackdrop}>
           <Pressable onPress={event => event.stopPropagation()} style={styles.selectSheet}>
             <View style={styles.selectHeader}><Text style={styles.selectTitle}>{label || placeholder}</Text><Pressable accessibilityRole="button" accessibilityLabel="Fermer" onPress={() => setOpen(false)}><X size={20} color={colors.ink}/></Pressable></View>
             {searchable ? <View style={[styles.inputShell, styles.selectSearch]}><Search size={17} color={colors.muted}/><TextInput value={query} onChangeText={setQuery} placeholder="Rechercher" placeholderTextColor={colors.muted} style={styles.input}/></View> : null}
@@ -114,7 +114,7 @@ export function Select({ label, value, options, onChange, placeholder = "Selecti
               }) : <Text style={styles.selectEmpty}>Aucun element disponible.</Text>}
             </ScrollView>
           </Pressable>
-        </Pressable>
+        </Pressable></SafeAreaView>
       </Modal>
     </View>;
 }
@@ -151,7 +151,7 @@ export function OperationResultModal({ result, onClose }) {
     const success = result.success;
     const Icon = success ? CheckCircle2 : XCircle;
     return <Modal visible transparent animationType="fade" statusBarTranslucent onRequestClose={onClose}>
-      <View style={styles.resultOverlay}>
+      <SafeAreaView edges={["top", "bottom", "left", "right"]} style={styles.modalSafe}><View style={styles.resultOverlay}>
         <View style={styles.resultSheet}>
           <View style={[styles.resultHero, !success && styles.resultHeroError]}>
             <View style={styles.resultIcon}><Icon size={30} color={success ? colors.forest : colors.danger}/></View>
@@ -164,11 +164,12 @@ export function OperationResultModal({ result, onClose }) {
             <Button label="Terminer" onPress={onClose}/>
           </View>
         </View>
-      </View>
+      </View></SafeAreaView>
     </Modal>;
 }
 
 const styles = StyleSheet.create({
+    modalSafe: { flex: 1, backgroundColor: "transparent" },
     selectShell: { justifyContent: "space-between" },
     selectValue: { flex: 1, fontFamily: font.medium, color: colors.ink, fontSize: 13 },
     selectPlaceholder: { color: colors.muted },
@@ -192,15 +193,15 @@ const styles = StyleSheet.create({
     chipActive: { backgroundColor: colors.mint, borderColor: colors.mintDark },
     chipText: { fontFamily: font.medium, color: colors.muted, fontSize: 11 },
     chipTextActive: { fontFamily: font.bold, color: colors.forest },
-    flex: { flex: 1 }, safe: { flex: 1, backgroundColor: colors.forest }, scroll: { flexGrow: 1, backgroundColor: colors.paper },
+    flex: { flex: 1 }, safe: { flex: 1, backgroundColor: colors.paper }, scroll: { flexGrow: 1, backgroundColor: colors.paper },
     screenContent: { paddingHorizontal: spacing.lg, paddingBottom: 104, gap: spacing.lg, backgroundColor: colors.paper },
     offline: { minHeight: 34, flexDirection: "row", alignItems: "center", gap: spacing.sm, backgroundColor: colors.mint, paddingHorizontal: spacing.md, borderRadius: radius.md },
     offlineText: { fontFamily: font.semibold, fontSize: 11, color: colors.forest },
-    header: { minHeight: 166, marginHorizontal: -spacing.lg, paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.xl, flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", backgroundColor: colors.forest, borderBottomLeftRadius: 16, borderBottomRightRadius: 16, ...shadow },
-    headerText: { flex: 1, paddingRight: spacing.md }, headerAction: { alignSelf: "center", marginTop: spacing.sm }, brandLine: { marginBottom: spacing.lg, flexDirection: "row", alignItems: "center", gap: 7 }, brandMark: { width: 8, height: 8, borderRadius: 2, backgroundColor: colors.coral }, brandName: { fontFamily: font.bold, fontSize: 9, color: colors.mint }, eyebrow: { fontFamily: font.bold, fontSize: 9, color: colors.coral, textTransform: "uppercase", marginBottom: 5 },
-    title: { fontFamily: font.bold, fontSize: 30, lineHeight: 36, color: colors.white, letterSpacing: 0 },
+    header: { minHeight: 116, marginHorizontal: -spacing.lg, paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.md, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: colors.white, borderBottomWidth: 1, borderBottomColor: colors.line },
+    headerText: { flex: 1, paddingRight: spacing.md }, headerAction: { alignSelf: "center" }, brandLine: { marginBottom: spacing.sm, flexDirection: "row", alignItems: "center", gap: 7 }, brandMark: { width: 8, height: 8, borderRadius: 2, backgroundColor: colors.primary }, brandName: { fontFamily: font.bold, fontSize: 9, color: colors.primary }, eyebrow: { fontFamily: font.bold, fontSize: 9, color: colors.muted, textTransform: "uppercase", marginBottom: 3 },
+    title: { fontFamily: font.bold, fontSize: 23, lineHeight: 29, color: colors.ink, letterSpacing: 0 },
     button: { minHeight: 52, borderRadius: radius.md, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.sm, paddingHorizontal: spacing.md },
-    button_primary: { backgroundColor: colors.forest }, button_secondary: { backgroundColor: colors.mint }, button_ghost: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
+    button_primary: { backgroundColor: colors.primary }, button_secondary: { backgroundColor: colors.brandSoft }, button_ghost: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
     buttonPressed: { opacity: 0.86, transform: [{ scale: 0.985 }] }, buttonText: { fontFamily: font.bold, color: colors.white, fontSize: 14 }, buttonTextDark: { color: colors.forest }, disabled: { opacity: 0.45 },
     iconButton: { width: 44, height: 44, borderRadius: radius.md, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, alignItems: "center", justifyContent: "center" }, iconPressed: { opacity: 0.7, transform: [{ scale: 0.94 }] },
     badge: { position: "absolute", top: -5, right: -5, minWidth: 19, height: 19, paddingHorizontal: 4, borderRadius: 10, backgroundColor: colors.coral, borderWidth: 2, borderColor: colors.paper, alignItems: "center", justifyContent: "center" }, badgeText: { fontFamily: font.bold, fontSize: 8, color: colors.white },

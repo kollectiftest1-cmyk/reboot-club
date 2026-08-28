@@ -12,9 +12,10 @@ import { useDispatch } from "react-redux";
 import { invalidate } from "@/store";
 
 const config = {
-    deposit: { eyebrow: "Capital", title: "Nouveau dépôt", icon: WalletCards, button: "Soumettre le dépôt" },
-    withdrawal: { eyebrow: "Capital libre", title: "Demander un retrait", icon: BanknoteArrowDown, button: "Soumettre le retrait" },
+    deposit: { eyebrow: "Entraide", title: "Faire une mise", icon: WalletCards, button: "Soumettre la mise" },
+    withdrawal: { eyebrow: "Fonds disponibles", title: "Demander une recuperation", icon: BanknoteArrowDown, button: "Soumettre la recuperation" },
     dispute: { eyebrow: "Assistance", title: "Ouvrir une réclamation", icon: ShieldAlert, button: "Envoyer la réclamation" },
+    support: { eyebrow: "Aide", title: "Contacter le support", icon: ShieldAlert, button: "Envoyer la demande" },
     announcement: { eyebrow: "Communication", title: "Publier une annonce", icon: Megaphone, button: "Publier au club" },
 };
 
@@ -39,31 +40,34 @@ export function OperationFormScreen() {
     if (!clubs) return <LoadingScreen/>;
     const club = clubs.find(item => item.id === clubId);
 
-    // Depot et retrait alimentent le portefeuille preteur global : aucun club requis.
-    const needsClub = ["dispute", "announcement"].includes(mode);
+    const needsClub = mode === "announcement";
+    const showClubSelector = ["announcement", "dispute", "support"].includes(mode) && clubs.length > 0;
+    const isWalletOperation = ["deposit", "withdrawal"].includes(mode);
 
     async function submit() {
         if (needsClub && !clubId) return;
         if (mode === "deposit" && !user.kyc_verified) {
-            setResult({ success: false, title: "KYC obligatoire", message: "Votre identite doit etre validee avant tout depot preteur.", detail: "Ouvrez Mon profil puis Mon dossier KYC." });
+            setResult({ success: false, title: "KYC obligatoire", message: "Votre identite doit etre validee avant toute mise communautaire.", detail: "Ouvrez Mon profil puis Mon dossier KYC." });
             return;
         }
         if (mode === "withdrawal" && Number(amount) > Number(balance?.net_available || 0)) {
-            setResult({ success: false, title: "Retrait impossible", message: "Le montant depasse votre fonds disponible.", detail: `Maximum retirable : ${money(balance?.net_available || 0, balance?.currency || "CDF")}.` });
+            setResult({ success: false, title: "Recuperation impossible", message: "Le montant depasse votre fonds disponible.", detail: `Maximum recuperable : ${money(balance?.net_available || 0, balance?.currency || "CDF")}.` });
             return;
         }
         setLoading(true);
         try {
             if (mode === "deposit") await api("/deposits/", { method: "POST", body: JSON.stringify({ lender: user.id, amount, payment_method: "mobile_money" }) });
             if (mode === "withdrawal") await api("/withdrawals/", { method: "POST", body: JSON.stringify({ amount }) });
-            if (mode === "dispute") await api("/disputes/", { method: "POST", body: JSON.stringify({ club: clubId, operation_type: "other", subject, description }) });
+            if (mode === "dispute") await api("/disputes/", { method: "POST", body: JSON.stringify({ club: clubId || null, operation_type: "other", subject, description }) });
+            if (mode === "support") await api("/disputes/", { method: "POST", body: JSON.stringify({ club: clubId || null, operation_type: "support", subject, description }) });
             if (mode === "announcement") await api("/messages/", { method: "POST", body: JSON.stringify({ club: clubId, kind: "announcement", body: description }) });
-            const domains = mode === "dispute" ? ["disputes", "dashboard"] : mode === "announcement" ? ["messages"] : ["dashboard", "validations", "clubs"];
+            const domains = ["dispute", "support"].includes(mode) ? ["disputes", "dashboard"] : mode === "announcement" ? ["messages"] : ["dashboard", "validations", "clubs"];
             dispatch(invalidate(domains));
             const messages = {
-                withdrawal: { title: "Demande envoyee", message: "Votre demande de retrait est maintenant en attente de validation.", detail: `Montant demande : ${money(amount, balance?.currency || club?.currency || "CDF")}. Vous suivrez son traitement dans vos notifications.` },
-                deposit: { title: "Depot envoye", message: "Votre depot a ete transmis pour validation.", detail: "Le fonds disponible sera mis a jour apres validation." },
+                withdrawal: { title: "Demande envoyee", message: "Votre demande de recuperation est maintenant en attente de validation.", detail: `Montant demande : ${money(amount, balance?.currency || club?.currency || "CDF")}. Vous suivrez son traitement dans vos notifications.` },
+                deposit: { title: "Mise envoyee", message: "Votre mise a ete transmise pour validation.", detail: "Le fonds disponible sera mis a jour apres validation." },
                 dispute: { title: "Reclamation envoyee", message: "Votre dossier a bien ete transmis.", detail: "Vous recevrez une notification apres son traitement." },
+                support: { title: "Demande de support envoyee", message: "L'equipe a bien recu votre question.", detail: "Vous recevrez une notification apres son traitement." },
                 announcement: { title: "Annonce publiee", message: "Le message est maintenant visible dans le chat du club." },
             };
             setResult({ success: true, ...messages[mode] });
@@ -77,13 +81,14 @@ export function OperationFormScreen() {
     const requiresAmount = ["deposit", "withdrawal"].includes(mode);
     return <Screen>
       <PageHeader eyebrow={meta.eyebrow} title={meta.title} action={<IconButton icon={ArrowLeft} label="Retour" onPress={() => navigation.goBack()}/>}/>
-      {mode === "deposit" && !user.kyc_verified ? <View style={styles.kycBlock}><ShieldAlert size={19} color={colors.coral}/><Text style={styles.kycBlockText}>Depot bloque jusqu'a la validation de votre dossier KYC.</Text></View> : null}
-      {mode === "withdrawal" && balance ? <View style={styles.available}><View><Text style={styles.availableLabel}>Maximum a retirer</Text><Text style={styles.availableValue}>{money(balance.net_available, balance.currency)}</Text><Pressable onPress={() => setAmount(String(balance.net_available))} style={styles.maxAction}><Text style={styles.maxActionText}>Utiliser le maximum</Text></Pressable></View><WalletCards size={22} color={colors.forest}/></View> : null}
-      {needsClub ? <View style={styles.section}><Text style={styles.sectionLabel}>Club de référence</Text>{clubs.map(item => <Pressable key={item.id} onPress={() => setClubId(item.id)} style={[styles.club, item.id === clubId && styles.clubActive]}><View style={[styles.clubIcon, item.id === clubId && styles.clubIconActive]}><Landmark size={18} color={item.id === clubId ? colors.white : colors.forest}/></View><View style={styles.clubText}><Text style={styles.clubName}>{item.name}</Text><Text style={styles.clubMeta}>{item.zone || "Référence administrative"}</Text></View>{item.id === clubId ? <View style={styles.selected}/> : null}</Pressable>)}</View> : <View style={styles.walletNote}><Text style={styles.walletNoteText}>Votre portefeuille de preteur est global : il n'est rattache a aucun club.</Text></View>}
-      {requiresAmount ? <View style={styles.form}><Field label="Montant" value={amount} onChangeText={value => setAmount(value.replace(/[^0-9.]/g, ""))} keyboardType="decimal-pad" placeholder={mode === "withdrawal" && balance ? `Maximum ${money(balance.net_available, balance.currency)}` : `Montant en ${club?.currency || "CDF"}`}/>{mode === "deposit" ? <Text style={styles.note}>Le dépôt sera disponible après validation du responsable.</Text> : <Text style={styles.note}>Le plafond correspond à votre fonds disponible total, tous clubs confondus.</Text>}</View> : null}
-      {mode === "dispute" ? <View style={styles.form}><Field label="Objet de la réclamation" value={subject} onChangeText={setSubject} placeholder="Ex. paiement non comptabilisé"/><Field label="Description détaillée" value={description} onChangeText={setDescription} multiline placeholder="Décrivez les faits et les références utiles"/></View> : null}
+      {mode === "deposit" && !user.kyc_verified ? <View style={styles.kycBlock}><ShieldAlert size={19} color={colors.coral}/><Text style={styles.kycBlockText}>Mise bloquee jusqu'a la validation de votre dossier KYC.</Text></View> : null}
+      {mode === "withdrawal" && balance ? <View style={styles.available}><View><Text style={styles.availableLabel}>Maximum recuperable</Text><Text style={styles.availableValue}>{money(balance.net_available, balance.currency)}</Text><Pressable onPress={() => setAmount(String(balance.net_available))} style={styles.maxAction}><Text style={styles.maxActionText}>Utiliser le maximum</Text></Pressable></View><WalletCards size={22} color={colors.forest}/></View> : null}
+      {showClubSelector ? <View style={styles.section}><Text style={styles.sectionLabel}>{needsClub ? "Club destinataire" : "Club concerne (facultatif)"}</Text>{clubs.map(item => <Pressable key={item.id} onPress={() => setClubId(item.id === clubId && !needsClub ? "" : item.id)} style={[styles.club, item.id === clubId && styles.clubActive]}><View style={[styles.clubIcon, item.id === clubId && styles.clubIconActive]}><Landmark size={18} color={item.id === clubId ? colors.white : colors.forest}/></View><View style={styles.clubText}><Text style={styles.clubName}>{item.name}</Text><Text style={styles.clubMeta}>{item.zone || "Reference administrative"}</Text></View>{item.id === clubId ? <View style={styles.selected}/> : null}</Pressable>)}</View> : null}
+      {isWalletOperation ? <View style={styles.walletNote}><Text style={styles.walletNoteText}>Votre portefeuille de preteur est global : il n'est rattache a aucun club.</Text></View> : null}
+      {requiresAmount ? <View style={styles.form}><Field label="Montant" value={amount} onChangeText={value => setAmount(value.replace(/[^0-9.]/g, ""))} keyboardType="decimal-pad" placeholder={mode === "withdrawal" && balance ? `Maximum ${money(balance.net_available, balance.currency)}` : `Montant en ${club?.currency || "CDF"}`}/>{mode === "deposit" ? <Text style={styles.note}>La mise sera disponible apres validation administrative.</Text> : <Text style={styles.note}>Le plafond correspond a votre fonds disponible total.</Text>}</View> : null}
+      {["dispute", "support"].includes(mode) ? <View style={styles.form}><Field label={mode === "support" ? "Votre question" : "Objet de la reclamation"} value={subject} onChangeText={setSubject} placeholder={mode === "support" ? "Ex. comment recuperer mes fonds ?" : "Ex. paiement non comptabilise"}/><Field label="Description detaillee" value={description} onChangeText={setDescription} multiline placeholder="Decrivez les faits et les references utiles"/></View> : null}
       {mode === "announcement" ? <Field label="Message au club" value={description} onChangeText={setDescription} multiline placeholder="Rédigez une information claire pour tous les membres"/> : null}
-      <Button label={meta.button} icon={Send} onPress={submit} loading={loading} disabled={(mode === "deposit" && !user.kyc_verified) || (needsClub && !clubId) || (requiresAmount ? !amount : mode === "dispute" ? !subject || !description : !description)}/>
+      <Button label={meta.button} icon={Send} onPress={submit} loading={loading} disabled={(mode === "deposit" && !user.kyc_verified) || (needsClub && !clubId) || (requiresAmount ? !amount : ["dispute", "support"].includes(mode) ? !subject || !description : !description)}/>
       <OperationResultModal result={result} onClose={() => { setResult(undefined); navigation.goBack(); }}/>
     </Screen>;
 }

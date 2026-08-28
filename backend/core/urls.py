@@ -3,7 +3,7 @@ from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from .views import (
-    AuditLogViewSet, ClubMessageViewSet, ClubViewSet, DepositViewSet, DisputeViewSet, EconomicActivityViewSet,
+    AuditLogViewSet, ClubMessageViewSet, ClubRateTierViewSet, ClubViewSet, DepositViewSet, DisputeViewSet, EconomicActivityViewSet,
     InvitationViewSet, KYCApplicationViewSet, LoanBorrowerViewSet, LoanPurposeViewSet, LoanViewSet,
     MembershipViewSet, NotificationViewSet, UserViewSet, WithdrawalViewSet,
     activity_counts, balance_summary, dashboard, health, loan_catalog, me, platform_configuration, register,
@@ -12,6 +12,7 @@ from .views import (
 
 router = DefaultRouter()
 router.register("clubs", ClubViewSet, basename="club")
+router.register("club-rate-tiers", ClubRateTierViewSet, basename="club-rate-tier")
 router.register("memberships", MembershipViewSet, basename="membership")
 router.register("deposits", DepositViewSet, basename="deposit")
 router.register("loans", LoanViewSet, basename="loan")

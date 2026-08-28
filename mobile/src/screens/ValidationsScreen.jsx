@@ -80,13 +80,13 @@ export function ValidationsScreen() {
                 value: "Validation de l'administrateur",
                 person: item,
             })),
-            ...loans.results.filter(item => ["submitted", "review"].includes(item.status)).map(item => ({
+            ...loans.results.filter(item => item.status === (admin ? "review" : "submitted")).map(item => ({
                 ...item,
                 type: "loan",
-                operation: "Validation d'une demande d'emprunt",
+                operation: admin ? "Validation finale d'une demande d'emprunt" : "Accord du chef sur une demande d'emprunt",
                 title: item.borrower_name,
                 subtitle: `Club : ${item.club_name || "Non renseigne"} - ${item.purpose}`,
-                profileLine: "Profil concerne : Emprunteur",
+                profileLine: admin ? "Chef du club : accord confirme  |  Decision admin attendue" : "Etape 1 : accord du chef  |  Etape 2 : validation admin",
                 detailLabel: "Montant demande",
                 value: money(item.amount, item.currency),
                 person: { name: item.borrower_name, avatar: item.borrower_avatar, selfie: item.borrower_selfie },
@@ -94,11 +94,11 @@ export function ValidationsScreen() {
             ...deposits.results.filter(item => item.status === "pending").map(item => ({
                 ...item,
                 type: "deposit",
-                operation: "Validation d'un depot client",
+                operation: "Validation d'une mise communautaire",
                 title: item.lender_name,
                 subtitle: `Portefeuille global du preteur`,
                 profileLine: "Profil concerne : Preteur",
-                detailLabel: "Montant du depot",
+                detailLabel: "Montant de la mise",
                 value: money(item.amount, item.currency),
                 person: { name: item.lender_name, avatar: item.lender_avatar, selfie: item.lender_selfie },
             })),
@@ -117,7 +117,7 @@ export function ValidationsScreen() {
             ...withdrawals.results.filter(item => ["submitted", "review"].includes(item.status)).map(item => ({
                 ...item,
                 type: "withdrawal",
-                operation: "Validation d'une demande de retrait",
+                operation: "Validation d'une demande de recuperation",
                 title: item.lender_name,
                 subtitle: `Portefeuille global du preteur`,
                 profileLine: "Profil concerne : Preteur",
@@ -186,7 +186,7 @@ function ValidationItem({ item, onDecide, onOpen, admin }) {
       <View style={styles.cardTop}><Avatar user={item.person} size={42}/><View style={styles.cardText}><Text style={styles.title}>{item.title}</Text><Text style={styles.subtitle}>{item.subtitle}</Text></View><Status value={item.status}/></View>
       <View style={styles.profileLine}><Text style={styles.profileLineText}>{item.profileLine}</Text></View>
       <View style={styles.decisionDetail}><Text style={styles.detailLabel}>{item.detailLabel}</Text><Text style={styles.value}>{item.value}</Text></View>
-      {item.type === "membership" ? <View style={styles.steps}><Text style={[styles.step, item.member_approved_at && styles.stepDone]}>Membre {item.member_approved_at ? "confirme" : "en attente"}</Text><Text style={[styles.step, item.leader_approved_at && styles.stepDone]}>Chef {item.leader_approved_at ? "confirme" : "en attente"}</Text><Text style={styles.step}>Admin {admin ? "a decider" : "ensuite"}</Text></View> : item.type === "lender_profile" ? <View style={styles.steps}><Text style={[styles.step, styles.stepDone]}>Demande envoyee</Text><Text style={styles.step}>Admin a decider</Text></View> : item.type === "economic_activity" ? <View style={styles.steps}><Text style={[styles.step, styles.stepDone]}>Usage prive conserve</Text><Text style={styles.step}>Publication admin</Text></View> : item.type === "placement" ? <View style={styles.steps}><Text style={[styles.step, styles.stepDone]}>Capital reserve</Text><Text style={styles.step}>Validation admin</Text><Text style={styles.step}>Financement du pret</Text></View> : null}
+      {item.type === "membership" ? <View style={styles.steps}><Text style={[styles.step, item.member_approved_at && styles.stepDone]}>Membre {item.member_approved_at ? "confirme" : "en attente"}</Text><Text style={[styles.step, item.leader_approved_at && styles.stepDone]}>Chef {item.leader_approved_at ? "confirme" : "en attente"}</Text><Text style={styles.step}>Admin {admin ? "a decider" : "ensuite"}</Text></View> : item.type === "loan" ? <View style={styles.steps}><Text style={[styles.step, admin && styles.stepDone]}>Chef {admin ? "a valide" : "a decider"}</Text><Text style={styles.step}>Admin {admin ? "a decider" : "ensuite"}</Text><Text style={styles.step}>Publication preteurs</Text></View> : item.type === "lender_profile" ? <View style={styles.steps}><Text style={[styles.step, styles.stepDone]}>Demande envoyee</Text><Text style={styles.step}>Admin a decider</Text></View> : item.type === "economic_activity" ? <View style={styles.steps}><Text style={[styles.step, styles.stepDone]}>Usage prive conserve</Text><Text style={styles.step}>Publication admin</Text></View> : item.type === "placement" ? <View style={styles.steps}><Text style={[styles.step, styles.stepDone]}>Capital reserve</Text><Text style={styles.step}>Validation admin</Text><Text style={styles.step}>Financement du pret</Text></View> : null}
       {item.type === "kyc" ? <Button icon={BadgeCheck} label="Examiner le dossier KYC" variant="secondary" onPress={onOpen}/> : <View style={styles.actions}><View style={styles.action}><Button label="Refuser" variant="ghost" onPress={() => onDecide(item, false)}/></View><View style={styles.action}><Button label={item.type === "membership" && !admin ? "Confirmer" : "Valider"} onPress={() => onDecide(item, true)}/></View></View>}
     </View>;
 }

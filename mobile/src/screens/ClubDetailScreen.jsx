@@ -16,24 +16,32 @@ export function ClubDetailScreen() {
     useEffect(() => { load(); }, [load, version]);
     if (!data) return <LoadingScreen/>;
     const { club, counts } = data; const manager = user.role === "admin" || (user.current_profile === "leader" && club.leader === user.id);
+    const borrowerView = user.current_profile === "borrower" && user.role !== "admin";
     const currentLoans = data.loans.filter(loan => ["disbursed", "current", "late"].includes(loan.status));
     const otherLoans = data.loans.filter(loan => !["disbursed", "current", "late"].includes(loan.status));
     const currentBalance = currentLoans.reduce((total, loan) => total + Number(loan.balance || 0), 0);
+    const borrowerTotals = data.loans.reduce((totals, loan) => ({ borrowed: totals.borrowed + Number(loan.amount || 0), paid: totals.paid + Number(loan.total_paid || 0), balance: totals.balance + Number(loan.balance || 0), charge: totals.charge + Number(loan.charge_total || 0) }), { borrowed: 0, paid: 0, balance: 0, charge: 0 });
     return <Screen>
       <PageHeader eyebrow={club.zone} title={club.name} action={<IconButton icon={ArrowLeft} label="Retour" onPress={() => navigation.goBack()}/>}/>
       <View style={styles.hero}><View style={styles.heroTop}><View style={styles.mark}><Landmark size={22} color={colors.white}/></View><Status value={club.status}/></View><Text style={styles.description}>{club.description || "Aucune description."}</Text><View style={styles.leader}><Avatar user={{ name: club.leader_name, avatar: club.leader_avatar, selfie: club.leader_selfie }} size={30}/><Text style={styles.leaderText}>Chef: {club.leader_name}</Text></View></View>
       <View style={styles.stats}><Stat icon={UsersRound} value={counts.members} label="Membres"/><Stat icon={Wallet} value={counts.lenders} label="Preteurs"/><Stat icon={PiggyBank} value={counts.active_loans} label="Prets actifs"/></View>
       <View><Text style={styles.sectionTitle}>Emprunts en cours</Text><View style={styles.currentSummary}><View><Text style={styles.currentLabel}>{currentLoans.length} dossier{currentLoans.length > 1 ? "s" : ""} actif{currentLoans.length > 1 ? "s" : ""}</Text><Text style={styles.currentValue}>{money(currentBalance, club.currency)}</Text><Text style={styles.currentHint}>Encours total restant a rembourser</Text></View><View style={styles.currentIcon}><Banknote size={21} color={colors.white}/></View></View>{currentLoans.length ? <View style={styles.list}>{currentLoans.map(loan => <LoanRow key={loan.id} loan={loan} onPress={() => navigation.navigate("LoanDetail", { loanId: loan.id })}/>)}</View> : <EmptyState icon={PiggyBank} title="Aucun emprunt en cours" message="Les prets decaisses apparaitront ici avec leur solde restant."/>}</View>
-      <View style={styles.finance}><Text style={styles.sectionTitle}>Situation financiere</Text>
-        <Row label="Capital emprunte" value={money(club.finances?.borrowed || 0, club.currency)}/>
-        <Row label="Encours de credit" value={money(club.finances?.engaged || 0, club.currency)}/>
-        <Row label="Total rembourse" value={money(club.finances?.repaid || 0, club.currency)}/>
-        {club.leader_commission_rate !== null && club.leader_commission_rate !== undefined ? <Row label="Commission chef de club" value={`${club.leader_commission_rate} %`}/> : null}
-        {club.finances?.leader_commission_collected !== undefined ? <Row label="Commission chef encaissee" value={money(club.finances.leader_commission_collected, club.currency)}/> : null}
-        {/* La commission de l'application et l'interet du preteur ne sont visibles que par l'admin. */}
-        {club.platform_fee_rate !== null && club.platform_fee_rate !== undefined ? <Row label="Commission application" value={`${club.platform_fee_rate} %`}/> : null}
-        {club.interest_rate !== null && club.interest_rate !== undefined ? <Row label="Interet preteur" value={`${club.interest_rate} %`}/> : null}
-        {club.borrower_charge_rate ? <Row label="Taux vu par l'emprunteur" value={`${club.borrower_charge_rate} %`}/> : null}
+      <View style={styles.finance}><Text style={styles.sectionTitle}>{borrowerView ? "Ma situation globale" : "Situation financiere"}</Text>
+        {borrowerView ? <>
+          <Row label="Total emprunte" value={money(borrowerTotals.borrowed, club.currency)}/>
+          <Row label="Cout global du credit" value={money(borrowerTotals.charge, club.currency)}/>
+          <Row label="Total rembourse" value={money(borrowerTotals.paid, club.currency)}/>
+          <Row label="Solde global restant" value={money(borrowerTotals.balance, club.currency)}/>
+          {club.borrower_charge_rate ? <Row label="Taux global applique" value={`${club.borrower_charge_rate} %`}/> : null}
+        </> : <>
+          <Row label="Capital emprunte" value={money(club.finances?.borrowed || 0, club.currency)}/>
+          <Row label="Encours de credit" value={money(club.finances?.engaged || 0, club.currency)}/>
+          <Row label="Total rembourse" value={money(club.finances?.repaid || 0, club.currency)}/>
+          {club.leader_commission_rate !== null && club.leader_commission_rate !== undefined ? <Row label="Commission chef de club" value={`${club.leader_commission_rate} %`}/> : null}
+          {club.finances?.leader_commission_collected !== undefined ? <Row label="Commission chef encaissee" value={money(club.finances.leader_commission_collected, club.currency)}/> : null}
+          {club.platform_fee_rate !== null && club.platform_fee_rate !== undefined ? <Row label="Commission application" value={`${club.platform_fee_rate} %`}/> : null}
+          {club.interest_rate !== null && club.interest_rate !== undefined ? <Row label="Interet preteur" value={`${club.interest_rate} %`}/> : null}
+        </>}
       </View>
       {data.memberships.length ? <View><Text style={styles.sectionTitle}>Comptes et profils</Text><View style={styles.list}>{data.memberships.map(item => <View key={item.id} style={styles.member}><Avatar user={item.user_detail} size={36}/><View style={styles.memberCopy}><Text style={styles.memberName}>{item.user_detail.name}</Text><Text style={styles.memberRole}>{item.role} - {item.user_detail.phone}</Text></View><Status value={item.status}/></View>)}</View></View> : null}
       {otherLoans.length ? <View><Text style={styles.sectionTitle}>Autres dossiers de pret</Text><View style={styles.list}>{otherLoans.map(loan => <LoanRow key={loan.id} loan={loan} onPress={() => navigation.navigate("LoanDetail", { loanId: loan.id })}/>)}</View></View> : null}

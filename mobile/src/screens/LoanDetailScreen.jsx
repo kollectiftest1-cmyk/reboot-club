@@ -7,7 +7,7 @@ import {
     CircleDollarSign, HandCoins, ReceiptText, TrendingUp, WalletCards,
 } from "lucide-react-native";
 
-import { Avatar, Button, Field, IconButton, LoadingScreen, PageHeader, Screen, Status } from "@/components/ui";
+import { Avatar, Button, Field, IconButton, LoadingScreen, OperationResultModal, PageHeader, Screen, Select, Status } from "@/components/ui";
 import { useAuth } from "@/context/AuthContext";
 import { api } from "@/lib/api";
 import { money, shortDate, shortDateTime, statusLabels } from "@/lib/format";
@@ -29,10 +29,14 @@ export function LoanDetailScreen() {
     const [fundingAmount, setFundingAmount] = useState("");
     const [forecast, setForecast] = useState();
     const [scheduleDate, setScheduleDate] = useState("");
+    const [agents, setAgents] = useState([]);
+    const [agentId, setAgentId] = useState("");
     const [loading, setLoading] = useState(false);
+    const [result, setResult] = useState();
 
-    const load = useCallback(() => api(`/loans/${loanId}/`).then(setLoan), [loanId]);
+    const load = useCallback(() => api(`/loans/${loanId}/`).then(value => { setLoan(value); setAgentId(value.collection_agent ? String(value.collection_agent) : ""); }), [loanId]);
     useEffect(() => { load(); }, [load, version]);
+    useEffect(() => { if (user.role === "admin") api("/users/").then(response => setAgents((response.results || []).filter(item => item.collector_profile_active))).catch(() => setAgents([])); }, [user.role]);
 
     const nextInstallment = useMemo(
         () => loan?.installments.find(item => item.status !== "paid"),
@@ -41,10 +45,18 @@ export function LoanDetailScreen() {
     if (!loan) return <LoadingScreen/>;
 
     const isLender = user.current_profile === "lender" && user.role !== "admin";
-    const isBorrower = user.current_profile === "borrower" && loan.borrower === user.id;
+    const isAdmin = user.role === "admin";
     const canManage = user.role === "admin" || user.current_profile === "leader";
-    const canRecordPayment = activeStatuses.includes(loan.status) && user.role === "admin";
-    const canFund = isLender && loan.can_fund && loan.status === "approved" && Number(loan.funding_remaining) > 0;
+    const canReviewLoan = (user.current_profile === "leader" && loan.status === "submitted") || (isAdmin && loan.status === "review");
+    const canRecordPayment = activeStatuses.includes(loan.status) && loan.can_collect;
+    const canFund = isLender && loan.can_fund && loan.status === "approved" && Number(loan.funding_open_amount) > 0;
+    const fundingBlockMessage = !isLender || canFund ? ""
+        : loan.status !== "approved" ? "Ce pret n'est pas ouvert au financement."
+        : Number(loan.funding_open_amount || 0) <= 0 ? "Le besoin de financement est deja entierement couvert."
+        : !user.kyc_verified ? "Votre KYC doit etre valide avant tout placement."
+        : user.lender_profile_status !== "active" ? "Votre profil preteur global doit etre actif."
+        : Number(loan.my_available_capital || 0) <= 0 ? "Votre fonds disponible est insuffisant. Effectuez d'abord une mise validee."
+        : "Votre profil ne remplit pas encore les conditions de placement.";
     const myFunding = loan.my_funding;
     const visibleSchedule = isLender ? (myFunding?.schedule || []) : loan.installments;
     const heroBalance = isLender && myFunding ? myFunding.remaining_return : loan.balance;
@@ -67,7 +79,7 @@ export function LoanDetailScreen() {
     function approve() {
         Alert.alert("Valider ce pret ?", `Montant demande : ${money(loan.amount, loan.currency)}.`, [
             { text: "Annuler", style: "cancel" },
-            { text: "Valider", onPress: () => command("decide", { approve: true }, "Le pret est ouvert aux preteurs du club.") },
+            { text: "Valider", onPress: () => command("decide", { approve: true }, isAdmin ? "Le pret est maintenant ouvert a tous les preteurs." : "Votre accord est enregistre. Le pret attend la validation finale de l'administrateur.") },
         ]);
     }
 
@@ -77,13 +89,17 @@ export function LoanDetailScreen() {
             Alert.alert("Montant invalide", `Saisissez un montant entre 1 et ${money(loan.balance, loan.currency)}.`);
             return;
         }
-        const label = canManage ? "Le remboursement a ete encaisse et affecte aux echeances." : "Votre versement a ete affecte aux echeances les plus proches.";
+        const label = loan.can_collect ? "Le remboursement a ete encaisse et affecte aux echeances." : "Votre versement a ete affecte aux echeances les plus proches.";
         await command("record-payment", { amount: payment, payment_method: paymentMethod }, label);
         setPayment("");
     }
 
     async function simulateFunding() {
-        if (!fundingAmount) return;
+        const numericAmount = Number(fundingAmount);
+        const maximum = Math.min(Number(loan.funding_open_amount || 0), Number(loan.my_available_capital || 0));
+        if (!Number.isFinite(numericAmount) || numericAmount <= 0 || numericAmount > maximum) {
+            return Alert.alert("Montant invalide", `Le maximum placable maintenant est de ${money(maximum, loan.currency)}.`);
+        }
         try {
             setForecast(await api(`/loans/${loan.id}/funding-forecast/?amount=${fundingAmount}`));
         } catch (error) {
@@ -93,9 +109,19 @@ export function LoanDetailScreen() {
 
     async function fund() {
         if (!forecast) return;
-        await command("fund", { amount: fundingAmount }, "Votre capital disponible et votre prevision ont ete mis a jour.");
-        setFundingAmount("");
-        setForecast(undefined);
+        setLoading(true);
+        try {
+            const response = await api(`/loans/${loan.id}/fund/`, { method: "POST", body: JSON.stringify({ amount: fundingAmount }) });
+            setLoan(response.loan);
+            dispatch(invalidate(["loans", "dashboard", "validations", "notifications"]));
+            setFundingAmount("");
+            setForecast(undefined);
+            setResult({ success: true, title: "Placement reserve", message: response.message, detail: "Le montant est deja retire de votre fonds disponible. Il financera le pret apres validation administrative." });
+        } catch (error) {
+            setResult({ success: false, title: "Placement impossible", message: error.message, detail: "Aucun montant n'a ete reserve." });
+        } finally {
+            setLoading(false);
+        }
     }
 
     return <Screen>
@@ -116,28 +142,31 @@ export function LoanDetailScreen() {
         <Metric label="Deja place ici" value={money(myFunding?.amount || 0, loan.currency)} icon={HandCoins}/>
       </View> : null}
 
-      {loan.status === "approved" ? <View style={styles.fundingProgress}>
+      {loan.status === "approved" && loan.funded_amount !== null ? <View style={styles.fundingProgress}>
         <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>Financement collectif</Text><Text style={styles.progressValue}>{Math.round(Number(loan.funded_amount) / Math.max(Number(loan.amount), 1) * 100)} %</Text></View>
         <Progress value={Number(loan.funded_amount)} total={Number(loan.amount)}/>
         <Text style={styles.progressMeta}>{money(loan.funded_amount, loan.currency)} reunis - {money(loan.funding_remaining, loan.currency)} restants</Text>
         {loan.scheduled_disbursement_date ? <Text style={styles.scheduleText}>Decaissement prevu le {shortDate(loan.scheduled_disbursement_date)}</Text> : null}
       </View> : null}
 
-      {canManage && ["submitted", "review"].includes(loan.status) ? <Button label="Valider et ouvrir au financement" icon={BadgeCheck} onPress={approve} loading={loading}/> : null}
+      {canReviewLoan ? <Button label={isAdmin ? "Valider et ouvrir au financement" : "Donner mon accord de chef"} icon={BadgeCheck} onPress={approve} loading={loading}/> : null}
 
-      {canManage && loan.status === "approved" && Number(loan.funding_remaining) === 0 ? <View style={styles.tool}>
+      {isAdmin && loan.status === "approved" && Number(loan.funding_remaining) === 0 ? <View style={styles.tool}>
         <Text style={styles.sectionTitle}>Decaissement</Text>
         <Text style={styles.note}>Le financement est complet. « Decaisser maintenant » enregistre immediatement la date et l'heure actuelles, puis active les modalites et l'echeancier.</Text>
+        <Select label="Mandataire d'encaissement (facultatif)" value={agentId} searchable options={[{ value: "", label: "Aucun - encaissement par l'admin" }, ...agents.map(item => ({ value: item.id, label: `${item.name} - ${item.phone}` }))]} onChange={setAgentId}/>
         <Field label="Date programmee AAAA-MM-JJ" value={scheduleDate} onChangeText={setScheduleDate} placeholder="2026-08-15"/>
         <Button label="Programmer la date" icon={CalendarClock} variant="secondary" onPress={() => command("schedule", { date: scheduleDate }, "La date est communiquee aux parties.")}/>
-        <Button label="Decaisser maintenant" icon={BanknoteArrowDown} onPress={() => command("disburse", {}, "Le pret est decaisse et l'echeancier est cree.")} loading={loading}/>
+        <Button label="Decaisser maintenant" icon={BanknoteArrowDown} onPress={() => command("disburse", { agent: agentId || null }, agentId ? "Le pret est decaisse et le mandat d'encaissement est transmis." : "Le pret est decaisse et restera encaisse par l'administration.")} loading={loading}/>
       </View> : null}
 
       {loan.disbursed_at ? <View style={styles.disbursementBand}><View style={styles.disbursementIcon}><BanknoteArrowDown size={20} color={colors.white}/></View><View style={styles.disbursementCopy}><Text style={styles.disbursementLabel}>Decaissement effectue</Text><Text style={styles.disbursementDate}>{shortDateTime(loan.disbursed_at)} (heure de Kinshasa)</Text><Text style={styles.disbursementHint}>Les echeances sont actives a partir de cette date.</Text></View></View> : null}
+      {isAdmin && loan.disbursed_at && activeStatuses.includes(loan.status) ? <View style={styles.tool}><Text style={styles.sectionTitle}>Mandataire d'encaissement</Text><Text style={styles.note}>{loan.collection_agent_name ? `${loan.collection_agent_name} peut encaisser ce pret.` : "Aucun mandataire: les encaissements restent reserves a l'administration."}</Text><Select label="Compte mandataire" value={agentId} searchable options={[{ value: "", label: "Aucun - administration" }, ...agents.map(item => ({ value: item.id, label: `${item.name} - ${item.phone}` }))]} onChange={setAgentId}/><Button label="Enregistrer le mandat" icon={BadgeCheck} variant="secondary" onPress={() => command("assign-agent", { agent: agentId || null }, agentId ? "Le mandataire a ete notifie." : "Le mandat a ete retire.")}/></View> : null}
 
       {myFunding ? <View style={styles.position}>
         <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>Mon placement</Text><TrendingUp size={20} color={colors.mintDark}/></View>
         <DataRow label="Capital place" value={money(myFunding.amount, loan.currency)}/>
+        {Number(myFunding.pending_amount) > 0 ? <DataRow label="En attente de validation" value={money(myFunding.pending_amount, loan.currency)} strong/> : null}
         <DataRow label="Gain prevu" value={money(myFunding.expected_gain, loan.currency)}/>
         <DataRow label="Total attendu" value={money(myFunding.expected_total, loan.currency)} strong/>
         <DataRow label="Deja recu" value={money(myFunding.total_received, loan.currency)}/>
@@ -146,18 +175,19 @@ export function LoanDetailScreen() {
       {canFund ? <View style={styles.tool}>
         <Text style={styles.sectionTitle}>{myFunding ? "Augmenter mon placement" : "Participer au financement"}</Text>
         <Text style={styles.note}>Le montant confirme est immediatement reserve et retire de votre capital disponible.</Text>
-        <Field label="Montant a investir" value={fundingAmount} onChangeText={value => { setFundingAmount(value.replace(/[^0-9.]/g, "")); setForecast(undefined); }} keyboardType="decimal-pad" placeholder={`Besoin restant ${money(loan.funding_remaining, loan.currency)}`}/>
+        <Field label="Montant de ma participation" value={fundingAmount} onChangeText={value => { setFundingAmount(value.replace(/[^0-9.]/g, "")); setForecast(undefined); }} keyboardType="decimal-pad" placeholder={`Maximum ouvert ${money(Math.min(Number(loan.funding_open_amount), Number(loan.my_available_capital || 0)), loan.currency)}`}/>
         <Button label="Calculer ma prevision" icon={TrendingUp} variant="secondary" onPress={simulateFunding}/>
         {forecast ? <View style={styles.forecast}>
-          <DataRow label="Capital investi" value={money(forecast.invested, forecast.currency)}/>
+          <DataRow label="Montant apporte" value={money(forecast.invested, forecast.currency)}/>
           <DataRow label="Gain estime" value={money(forecast.expected_gain, forecast.currency)}/>
           <DataRow label="Total attendu" value={money(forecast.expected_total, forecast.currency)} strong/>
-          <DataRow label="Retour mensuel estime" value={money(forecast.estimated_monthly_return, forecast.currency)}/>
+          <DataRow label={`Retour par echeance (${forecast.frequency_label})`} value={money(forecast.estimated_periodic_return, forecast.currency)}/>
           <DataRow label="Premiere echeance" value={shortDate(forecast.first_due_date)}/>
           <DataRow label="Derniere echeance" value={shortDate(forecast.last_due_date)}/>
           <Button label="Confirmer ma participation" icon={HandCoins} onPress={fund} loading={loading}/>
         </View> : null}
       </View> : null}
+      {fundingBlockMessage ? <View style={styles.fundingBlocked}><Text style={styles.fundingBlockedTitle}>Placement indisponible</Text><Text style={styles.fundingBlockedText}>{fundingBlockMessage}</Text></View> : null}
 
       {activeStatuses.includes(loan.status) || loan.status === "repaid" ? <View style={styles.terms}>
         <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>Modalites de remboursement</Text><ReceiptText size={20} color={colors.forest}/></View>
@@ -171,11 +201,11 @@ export function LoanDetailScreen() {
       </View> : null}
 
       {canRecordPayment ? <View style={styles.tool}>
-        <Text style={styles.sectionTitle}>{canManage ? "Encaisser un remboursement" : "Effectuer un remboursement"}</Text>
+        <Text style={styles.sectionTitle}>{loan.can_collect ? "Encaisser un remboursement" : "Effectuer un remboursement"}</Text>
         <Text style={styles.note}>Le montant sera impute automatiquement sur l'echeance la plus proche, puis sur les suivantes si elle est deja couverte.</Text>
         <View style={styles.methods}>{[{ id: "cash", label: "Especes" }, { id: "mobile_money", label: "Mobile Money" }].map(item => <Pressable key={item.id} onPress={() => setPaymentMethod(item.id)} style={[styles.method, paymentMethod === item.id && styles.methodActive]}><Text style={[styles.methodText, paymentMethod === item.id && styles.methodTextActive]}>{item.label}</Text></Pressable>)}</View>
         <Field label="Montant recu" value={payment} onChangeText={value => setPayment(value.replace(/[^0-9.]/g, ""))} keyboardType="decimal-pad" placeholder={`Maximum ${money(loan.balance, loan.currency)}`}/>
-        <Button label={canManage ? "Encaisser le retour" : "Payer maintenant"} icon={CircleDollarSign} onPress={pay} loading={loading}/>
+        <Button label={loan.can_collect ? "Encaisser le retour" : "Payer maintenant"} icon={CircleDollarSign} onPress={pay} loading={loading}/>
       </View> : null}
 
       <View style={styles.sectionHeader}>
@@ -188,6 +218,7 @@ export function LoanDetailScreen() {
         <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>Paiements encaisses</Text><Text style={styles.sectionMeta}>{loan.repayments.length}</Text></View>
         {loan.repayments.map(item => <View key={item.id} style={styles.historyRow}><View><Text style={styles.historyAmount}>{money(item.amount, loan.currency)}</Text><Text style={styles.historyMeta}>{shortDate(item.created_at)} - {item.payment_method === "cash" ? "Especes" : "Mobile Money"}</Text></View><CheckCircle2 size={19} color={colors.mintDark}/></View>)}
       </View> : null}
+      <OperationResultModal result={result} onClose={() => setResult(undefined)}/>
     </Screen>;
 }
 
@@ -225,6 +256,7 @@ const styles = StyleSheet.create({
     disbursementBand: { minHeight: 86, padding: spacing.md, flexDirection: "row", alignItems: "center", gap: spacing.md, borderRadius: radius.md, backgroundColor: colors.forest }, disbursementIcon: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center", backgroundColor: colors.coral }, disbursementCopy: { flex: 1 }, disbursementLabel: { fontFamily: font.bold, color: colors.white, fontSize: 12 }, disbursementDate: { marginTop: 3, fontFamily: font.bold, color: colors.mint, fontSize: 11 }, disbursementHint: { marginTop: 3, fontFamily: font.medium, color: colors.mint, fontSize: 9 },
     fundingProgress: { gap: spacing.sm, padding: spacing.md, borderRadius: radius.md, backgroundColor: colors.sky }, progressValue: { fontFamily: font.bold, color: colors.skyDark, fontSize: 14 }, progressTrack: { height: 9, borderRadius: 5, overflow: "hidden", backgroundColor: colors.line }, progressFill: { height: 9, backgroundColor: colors.coral }, progressMeta: { fontFamily: font.medium, color: colors.skyDark, fontSize: 10 }, scheduleText: { fontFamily: font.bold, color: colors.forest, fontSize: 10 },
     position: { gap: spacing.sm, padding: spacing.lg, borderRadius: radius.md, backgroundColor: colors.mint }, forecast: { gap: spacing.sm, padding: spacing.md, borderRadius: radius.md, backgroundColor: colors.mint },
+    fundingBlocked: { gap: spacing.xs, padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.coral, backgroundColor: colors.coralSoft }, fundingBlockedTitle: { fontFamily: font.bold, color: colors.danger, fontSize: 12 }, fundingBlockedText: { fontFamily: font.medium, color: colors.danger, fontSize: 10, lineHeight: 16 },
     dataRow: { minHeight: 30, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.md }, dataLabel: { flex: 1, fontFamily: font.medium, color: colors.muted, fontSize: 10 }, dataValue: { fontFamily: font.bold, color: colors.ink, fontSize: 11, textAlign: "right" }, dataStrong: { color: colors.forest, fontSize: 13 },
     terms: { gap: spacing.md, padding: spacing.lg, borderRadius: radius.md, backgroundColor: colors.mint }, termsText: { fontFamily: font.medium, color: colors.forest, fontSize: 11, lineHeight: 18 },
     methods: { flexDirection: "row", gap: spacing.sm }, method: { flex: 1, minHeight: 44, borderRadius: radius.md, borderWidth: 1, borderColor: colors.line, alignItems: "center", justifyContent: "center", backgroundColor: colors.paper }, methodActive: { borderColor: colors.forest, backgroundColor: colors.mint }, methodText: { fontFamily: font.semibold, color: colors.muted, fontSize: 11 }, methodTextActive: { fontFamily: font.bold, color: colors.forest },

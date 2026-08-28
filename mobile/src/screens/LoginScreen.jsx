@@ -36,9 +36,9 @@ export function LoginScreen() {
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets showsVerticalScrollIndicator={false}>
           <View style={styles.hero}>
             <Reveal>
-              <View style={styles.brand}><Image source={require("../../assets/icon.png")} style={styles.logo}/><View><Text style={styles.brandName}>REBOOT CLUB</Text><Text style={styles.brandMeta}>Épargne et crédit communautaire</Text></View></View>
-              <Text style={styles.title}>L’argent du club, en toute confiance.</Text>
-              <Text style={styles.subtitle}>Suivez chaque dépôt, décision et remboursement depuis un espace sécurisé.</Text>
+              <View style={styles.brand}><Image source={require("../../assets/icon.png")} style={styles.logo}/><View><Text style={styles.brandName}>REBOOT CLUB</Text><Text style={styles.brandMeta}>Entraide communautaire entre les clubs</Text></View></View>
+              <Text style={styles.title}>Ensemble pour nous soutenir en toute confiance.</Text>
+              <Text style={styles.subtitle}>Facilitez les mises, les aides, les emprunts et les remboursements entre membres, avec des regles claires et tracables.</Text>
             </Reveal>
           </View>
           <Reveal delay={100} style={styles.panel}>
@@ -54,8 +54,8 @@ export function LoginScreen() {
 }
 
 const styles = StyleSheet.create({
-    safe: { flex: 1, backgroundColor: colors.forest }, flex: { flex: 1 }, content: { flexGrow: 1, backgroundColor: colors.paper },
-    hero: { minHeight: 330, paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: spacing.xxl, backgroundColor: colors.forest, justifyContent: "space-between" },
+    safe: { flex: 1, backgroundColor: colors.primary }, flex: { flex: 1 }, content: { flexGrow: 1, backgroundColor: colors.paper },
+    hero: { minHeight: 345, paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: spacing.xxl, backgroundColor: colors.primary, justifyContent: "space-between" },
     brand: { flexDirection: "row", alignItems: "center", gap: spacing.sm, marginBottom: 54 }, logo: { width: 48, height: 48, borderRadius: radius.md },
     brandName: { fontFamily: font.bold, fontSize: 14, color: colors.white }, brandMeta: { fontFamily: font.medium, fontSize: 9, color: colors.mint, marginTop: 2 },
     title: { fontFamily: font.bold, fontSize: 38, lineHeight: 44, letterSpacing: 0, color: colors.white, maxWidth: 350 }, subtitle: { fontFamily: font.regular, fontSize: 14, lineHeight: 22, color: colors.mint, maxWidth: 330, marginTop: spacing.md },

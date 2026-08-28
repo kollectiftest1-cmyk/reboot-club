@@ -142,6 +142,7 @@ class User(AbstractUser):
     lender_profile_reviewed_by = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT, related_name="reviewed_lender_profiles")
     lender_profile_decision_reason = models.TextField(blank=True)
     anonymous_lender = models.BooleanField(default=False)
+    collector_profile_active = models.BooleanField(default=False)
 
     USERNAME_FIELD = "phone"
     REQUIRED_FIELDS = ["email", "first_name", "last_name"]
@@ -172,7 +173,9 @@ class User(AbstractUser):
         profiles = set(self.memberships.filter(status="active", role__in=["leader", "borrower"]).values_list("role", flat=True))
         if self.lender_profile_status == self.LenderProfileStatus.ACTIVE:
             profiles.add(self.Role.LENDER)
-        if self.role in [self.Role.ADMIN, self.Role.LEADER, self.Role.MEDIATOR, self.Role.COLLECTOR]:
+        if self.collector_profile_active or self.role == self.Role.COLLECTOR:
+            profiles.add(self.Role.COLLECTOR)
+        if self.role in [self.Role.ADMIN, self.Role.LEADER, self.Role.MEDIATOR]:
             profiles.add(self.role)
         return [value for value, _ in self.Role.choices if value in profiles]
 
@@ -216,6 +219,27 @@ class Club(TimeStampedModel):
         codes = [code for code in LOAN_DURATIONS if code in (self.allowed_durations or [])]
         return codes or list(LOAN_DURATIONS)
 
+    def rates_for(self, amount):
+        amount = Decimal(amount)
+        tier = self.rate_tiers.filter(min_amount__lte=amount).filter(
+            models.Q(max_amount__isnull=True) | models.Q(max_amount__gte=amount)
+        ).order_by("-min_amount").first()
+        if tier:
+            return {
+                "interest_rate": tier.interest_rate,
+                "platform_fee_rate": tier.platform_fee_rate,
+                "leader_commission_rate": tier.leader_commission_rate,
+                "tier": tier,
+            }
+        if self.rate_tiers.exists():
+            return None
+        return {
+            "interest_rate": self.interest_rate,
+            "platform_fee_rate": self.platform_fee_rate,
+            "leader_commission_rate": self.leader_commission_rate,
+            "tier": None,
+        }
+
     def __str__(self):
         return self.name
 
@@ -223,6 +247,19 @@ class Club(TimeStampedModel):
         constraints = [
             models.UniqueConstraint(fields=["leader"], condition=models.Q(leader__isnull=False), name="one_club_per_leader"),
         ]
+
+
+class ClubRateTier(TimeStampedModel):
+    club = models.ForeignKey(Club, on_delete=models.CASCADE, related_name="rate_tiers")
+    min_amount = models.DecimalField(max_digits=16, decimal_places=2, validators=[MinValueValidator(0)])
+    max_amount = models.DecimalField(max_digits=16, decimal_places=2, null=True, blank=True, validators=[MinValueValidator(0)])
+    interest_rate = models.DecimalField(max_digits=5, decimal_places=2, validators=[MinValueValidator(0), MaxValueValidator(100)])
+    leader_commission_rate = models.DecimalField(max_digits=5, decimal_places=2, validators=[MinValueValidator(0), MaxValueValidator(100)])
+    platform_fee_rate = models.DecimalField(max_digits=5, decimal_places=2, validators=[MinValueValidator(0), MaxValueValidator(100)])
+
+    class Meta:
+        ordering = ["min_amount"]
+        constraints = [models.UniqueConstraint(fields=["club", "min_amount"], name="unique_club_rate_tier_start")]
 
 
 class Membership(TimeStampedModel):
@@ -457,8 +494,8 @@ class Loan(FinancialModel):
 
     @property
     def funding_open_amount(self):
-        """Montant encore ouvert aux nouveaux placements (valides + en attente)."""
-        return max(self.amount - self.funded_amount - self.pending_funding_amount, Decimal("0"))
+        """Montant encore ouvert; les propositions en attente ne bloquent pas les autres."""
+        return self.funding_remaining
 
 
 class LoanBorrower(TimeStampedModel):
@@ -514,9 +551,6 @@ class LoanFunding(TimeStampedModel):
     expected_gain = models.DecimalField(max_digits=16, decimal_places=2, default=0)
     principal_repaid = models.DecimalField(max_digits=16, decimal_places=2, default=0)
     interest_earned = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-
-    class Meta:
-        constraints = [models.UniqueConstraint(fields=["loan", "lender"], name="unique_loan_lender")]
 
     @property
     def review_status(self):
@@ -651,7 +685,7 @@ class Dispute(TimeStampedModel):
         CLOSED = "closed", "Clos"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    club = models.ForeignKey(Club, on_delete=models.PROTECT, related_name="disputes")
+    club = models.ForeignKey(Club, null=True, blank=True, on_delete=models.PROTECT, related_name="disputes")
     opened_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="opened_disputes")
     assigned_to = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="assigned_disputes")
     operation_type = models.CharField(max_length=32)

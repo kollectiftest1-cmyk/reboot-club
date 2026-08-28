@@ -10,24 +10,29 @@ import { useAuth } from "@/context/AuthContext";
 import { api } from "@/lib/api";
 import { ChatScreen } from "@/screens/ChatScreen";
 import { AdminOperationsScreen } from "@/screens/AdminOperationsScreen";
+import { AccountValidationsScreen } from "@/screens/AccountValidationsScreen";
 import { BalanceScreen } from "@/screens/BalanceScreen";
 import { ClubDetailScreen } from "@/screens/ClubDetailScreen";
 import { ClubFormScreen } from "@/screens/ClubFormScreen";
+import { ClubRateTiersScreen } from "@/screens/ClubRateTiersScreen";
 import { ClubsScreen } from "@/screens/ClubsScreen";
 import { CollectionsScreen } from "@/screens/CollectionsScreen";
 import { DashboardScreen } from "@/screens/DashboardScreen";
 import { DisputesScreen } from "@/screens/DisputesScreen";
 import { IdentitiesScreen } from "@/screens/IdentitiesScreen";
+import { HelpSupportScreen } from "@/screens/HelpSupportScreen";
 import { KYCFormScreen } from "@/screens/KYCFormScreen";
 import { LoanPurposesScreen } from "@/screens/LoanPurposesScreen";
 import { LoanRequestScreen } from "@/screens/LoanRequestScreen";
 import { LoanDetailScreen } from "@/screens/LoanDetailScreen";
 import { LoansScreen } from "@/screens/LoansScreen";
 import { LoginScreen } from "@/screens/LoginScreen";
+import { LegalScreen } from "@/screens/LegalScreen";
 import { ManagementScreen } from "@/screens/ManagementScreen";
 import { MembersScreen } from "@/screens/MembersScreen";
 import { MemberFormScreen } from "@/screens/MemberFormScreen";
 import { MemberDetailScreen } from "@/screens/MemberDetailScreen";
+import { MemberProfileAddScreen } from "@/screens/MemberProfileAddScreen";
 import { NotificationsScreen } from "@/screens/NotificationsScreen";
 import { PlatformSettingsScreen } from "@/screens/PlatformSettingsScreen";
 import { ProfileScreen } from "@/screens/ProfileScreen";
@@ -65,13 +70,13 @@ function MainTabs() {
         tabBarIcon: ({ color, size }) => { const Icon = icons[route.name]; return <Icon color={color} size={size}/>; },
         tabBarBadge: badge(badgeFor(route.name)),
         tabBarBadgeStyle: { backgroundColor: colors.coral, color: colors.white, fontFamily: font.bold, fontSize: 9 },
-        tabBarActiveTintColor: colors.coral, tabBarInactiveTintColor: colors.muted,
+        tabBarActiveTintColor: colors.primary, tabBarInactiveTintColor: colors.muted,
         tabBarLabelStyle: { fontFamily: font.semibold, fontSize: 10 }, tabBarHideOnKeyboard: true,
-        tabBarStyle: { height: 62 + insets.bottom, paddingTop: 7, paddingBottom: Math.max(insets.bottom, 8), backgroundColor: colors.white, borderTopColor: colors.line },
+        tabBarStyle: { height: 64 + insets.bottom, paddingTop: 8, paddingBottom: Math.max(insets.bottom, 8), backgroundColor: colors.white, borderTopColor: colors.line, shadowColor: colors.forestDark, shadowOpacity: .08, shadowRadius: 12 },
     })}>
       <Tab.Screen name="Accueil" component={DashboardScreen}/>
       {!globalLender && !collector ? <Tab.Screen name="Clubs" component={ClubsScreen}/> : null}
-      {!globalLender ? <Tab.Screen name="Chat" component={ChatScreen}/> : null}
+      {!globalLender && !collector ? <Tab.Screen name="Chat" component={ChatScreen}/> : null}
       {manager ? <Tab.Screen name="Gestion" component={ManagementScreen}/>
         : collector ? <Tab.Screen name="Encaissements" component={CollectionsScreen}/>
         : <Tab.Screen name="Prets" component={LoansScreen}/>}
@@ -88,6 +93,7 @@ export function AppNavigator() {
         <Stack.Screen name="Balance" component={BalanceScreen}/>
         <Stack.Screen name="ClubDetail" component={ClubDetailScreen}/>
         <Stack.Screen name="ClubForm" component={ClubFormScreen}/>
+        <Stack.Screen name="ClubRateTiers" component={ClubRateTiersScreen}/>
         <Stack.Screen name="Notifications" component={NotificationsScreen}/>
         <Stack.Screen name="LoanRequest" component={LoanRequestScreen}/>
         <Stack.Screen name="LoanDetail" component={LoanDetailScreen}/>
@@ -95,12 +101,16 @@ export function AppNavigator() {
         <Stack.Screen name="Collections" component={CollectionsScreen}/>
         <Stack.Screen name="OperationForm" component={OperationFormScreen}/>
         <Stack.Screen name="AdminOperations" component={AdminOperationsScreen}/>
+        <Stack.Screen name="AccountValidations" component={AccountValidationsScreen}/>
         <Stack.Screen name="Validations" component={ValidationsScreen}/>
         <Stack.Screen name="Members" component={MembersScreen}/>
         <Stack.Screen name="MemberForm" component={MemberFormScreen}/>
         <Stack.Screen name="MemberDetail" component={MemberDetailScreen}/>
+        <Stack.Screen name="MemberProfileAdd" component={MemberProfileAddScreen}/>
         <Stack.Screen name="KYCForm" component={KYCFormScreen}/>
         <Stack.Screen name="Identities" component={IdentitiesScreen}/>
+        <Stack.Screen name="HelpSupport" component={HelpSupportScreen}/>
+        <Stack.Screen name="Legal" component={LegalScreen}/>
         <Stack.Screen name="Disputes" component={DisputesScreen}/>
         <Stack.Screen name="Settings" component={SettingsScreen}/>
         <Stack.Screen name="PlatformSettings" component={PlatformSettingsScreen}/>

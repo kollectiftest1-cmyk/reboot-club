@@ -28,6 +28,11 @@ def make_loan(club, borrower, **kwargs):
     return loan
 
 
+def approve_for_funding(loan, admin):
+    approve_loan(loan, loan.club.leader)
+    return approve_loan(loan, admin)
+
+
 class CostModelTests(TestCase):
     """Le cout du credit est un pourcentage FIXE du capital, jamais mensualise."""
 
@@ -104,7 +109,7 @@ class FinanceWorkflowTests(TestCase):
         self.assertEqual(lender_total_available(self.lender), Decimal("500000.00"))
 
         loan = make_loan(self.club, self.borrower, amount=Decimal("300000"))
-        approve_loan(loan, self.admin)
+        approve_for_funding(loan, self.admin)
         loan.refresh_from_db()
         self.assertEqual(loan.interest_total, Decimal("60000.00"))
         self.assertEqual(loan.fee_total, Decimal("30000.00"))
@@ -155,7 +160,7 @@ class FinanceWorkflowTests(TestCase):
         deposit = Deposit.objects.create(lender=self.lender, amount=Decimal("500000"), currency="CDF")
         validate_deposit(deposit, self.admin)
         loan = make_loan(self.club, self.borrower, amount=Decimal("300000"))
-        approve_loan(loan, self.admin)
+        approve_for_funding(loan, self.admin)
         self._fund_and_validate(loan, Decimal("300000"))
         loan.refresh_from_db()
         with self.assertRaises(Exception):
@@ -171,7 +176,7 @@ class FinanceWorkflowTests(TestCase):
         deposit = Deposit.objects.create(lender=self.lender, amount=Decimal("500000"), currency="CDF")
         validate_deposit(deposit, self.admin)
         loan = make_loan(self.club, self.borrower, amount=Decimal("300000"))
-        approve_loan(loan, self.admin)
+        approve_for_funding(loan, self.admin)
         self._fund_and_validate(loan, Decimal("300000"))
         loan.refresh_from_db()
         loan = disburse_loan(loan, self.admin)
@@ -186,17 +191,86 @@ class FinanceWorkflowTests(TestCase):
         allowed = client.post(f"/api/v1/loans/{loan.id}/record-payment/", {"amount": "10000"}, format="json")
         self.assertEqual(allowed.status_code, 201)
 
+    def test_admin_can_choose_an_appointed_collector_during_disbursement(self):
+        agent = User.objects.create_user("+243810000041", email="appointed-agent@test.cd", password="Password123!", role=User.Role.BORROWER, kyc_verified=True, collector_profile_active=True)
+        outsider = User.objects.create_user("+243810000042", email="outsider@test.cd", password="Password123!", role=User.Role.BORROWER, kyc_verified=True)
+        validate_deposit(Deposit.objects.create(lender=self.lender, amount=Decimal("300000"), currency="CDF"), self.admin)
+        loan = make_loan(self.club, self.borrower, amount=Decimal("300000"))
+        approve_for_funding(loan, self.admin)
+        self._fund_and_validate(loan, Decimal("300000"))
+
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        refused = client.post(f"/api/v1/loans/{loan.id}/disburse/", {"agent": outsider.id}, format="json")
+        self.assertEqual(refused.status_code, 400)
+        accepted = client.post(f"/api/v1/loans/{loan.id}/disburse/", {"agent": agent.id}, format="json")
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted.data["collection_agent"], agent.id)
+
+        agent.active_profile = User.Role.COLLECTOR
+        agent.save(update_fields=["active_profile"])
+        client.force_authenticate(user=agent)
+        assigned = client.get("/api/v1/loans/to-collect/")
+        self.assertIn(str(loan.id), {str(item["id"]) for item in assigned.data["results"]})
+
     def test_rejected_placement_frees_the_lender_capital(self):
         deposit = Deposit.objects.create(lender=self.lender, amount=Decimal("500000"), currency="CDF")
         validate_deposit(deposit, self.admin)
         loan = make_loan(self.club, self.borrower, amount=Decimal("300000"))
-        approve_loan(loan, self.admin)
+        approve_for_funding(loan, self.admin)
         funding = fund_loan(loan, self.lender, Decimal("300000"))
         self.assertEqual(lender_total_available(self.lender), Decimal("200000.00"))
         review_funding(funding, self.admin, approve=False, reason="Dossier incomplet")
         self.assertEqual(lender_total_available(self.lender), Decimal("500000.00"))
         loan.refresh_from_db()
         self.assertEqual(loan.funded_amount, Decimal("0"))
+
+    def test_lender_placement_is_reserved_and_returned_in_the_api(self):
+        validate_deposit(Deposit.objects.create(lender=self.lender, amount=Decimal("500000"), currency="CDF"), self.admin)
+        loan = make_loan(self.club, self.borrower, amount=Decimal("300000"))
+        approve_for_funding(loan, self.admin)
+        client = APIClient()
+        client.force_authenticate(user=self.lender)
+        response = client.post(f"/api/v1/loans/{loan.id}/fund/", {"amount": "100000"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["funding"]["pending_amount"], "100000.00")
+        self.assertEqual(Decimal(response.data["loan"]["my_funding"]["pending_amount"]), Decimal("100000.00"))
+        self.assertEqual(Decimal(response.data["loan"]["my_available_capital"]), Decimal("400000.00"))
+        self.assertEqual(Decimal(response.data["loan"]["funding_open_amount"]), Decimal("300000.00"))
+        self.assertEqual(Decimal(response.data["loan"]["funded_amount"]), Decimal("0.00"))
+
+    def test_multiple_oversubscribed_proposals_are_independent_and_auto_cancelled(self):
+        lenders = [self.lender]
+        for index in range(3):
+            lender = User.objects.create_user(
+                f"+24381000007{index}", email=f"queue{index}@test.cd", password="Password123!",
+                role=User.Role.LENDER, kyc_verified=True,
+            )
+            lenders.append(lender)
+        for lender in lenders:
+            validate_deposit(Deposit.objects.create(lender=lender, amount=Decimal("200000"), currency="CDF"), self.admin)
+        loan = make_loan(self.club, self.borrower, amount=Decimal("100000"))
+        approve_for_funding(loan, self.admin)
+
+        first = fund_loan(loan, lenders[0], Decimal("80000"))
+        same_lender_again = fund_loan(loan, lenders[0], Decimal("10000"))
+        second = fund_loan(loan, lenders[1], Decimal("50000"))
+        third = fund_loan(loan, lenders[2], Decimal("100000"))
+        fourth = fund_loan(loan, lenders[3], Decimal("90000"))
+        self.assertEqual(loan.fundings.filter(pending_amount__gt=0).count(), 5)
+        loan.refresh_from_db()
+        self.assertEqual(loan.funding_open_amount, Decimal("100000.00"))
+
+        review_funding(second, self.admin, approve=True)
+        loan.refresh_from_db()
+        self.assertEqual(loan.funded_amount, Decimal("50000.00"))
+        self.assertEqual(loan.funding_remaining, Decimal("50000.00"))
+        for proposal in [first, third, fourth]:
+            proposal.refresh_from_db()
+            self.assertEqual(proposal.pending_amount, Decimal("0.00"))
+            self.assertIn("seulement 50000.00 CDF reste disponible", proposal.decision_reason)
+        same_lender_again.refresh_from_db()
+        self.assertEqual(same_lender_again.pending_amount, Decimal("10000.00"))
 
     def test_rejected_deposit_does_not_increase_capital(self):
         deposit = Deposit.objects.create(lender=self.lender, amount=Decimal("500000"), currency="CDF")
@@ -209,7 +283,7 @@ class FinanceWorkflowTests(TestCase):
         for amount in [Decimal("100000"), Decimal("200000")]:
             validate_deposit(Deposit.objects.create(lender=self.lender, amount=amount, currency="CDF"), self.admin)
         loan = make_loan(self.club, self.borrower, amount=Decimal("250000"))
-        approve_loan(loan, self.admin)
+        approve_for_funding(loan, self.admin)
         self._fund_and_validate(loan, Decimal("250000"))
         self.assertEqual(lender_total_available(self.lender), Decimal("50000.00"))
         self.assertEqual(lender_available(self.club, self.lender), Decimal("50000.00"))
@@ -343,7 +417,7 @@ class FinanceWorkflowTests(TestCase):
         other_club = Club.objects.create(name="Autre Club", zone="Matete", leader=other_leader, status=Club.Status.ACTIVE)
         Membership.objects.create(club=other_club, user=other_borrower, role=Membership.Role.BORROWER, status=Membership.Status.ACTIVE)
         other_loan = make_loan(other_club, other_borrower, amount=Decimal("20000"), duration_code="2m", installment_total=2)
-        approve_loan(other_loan, self.admin)
+        approve_for_funding(other_loan, self.admin)
         offers = client.get("/api/v1/loans/")
         self.assertIn(str(other_loan.id), {str(item["id"]) for item in offers.data["results"]})
 
@@ -425,6 +499,26 @@ class CollectiveLoanTests(TestCase):
         self.assertEqual(shares[str(self.b.id)], Decimal("150000.00"))
         self.assertEqual(sum(shares.values()), Decimal("300000.00"))
 
+    def test_co_borrower_from_another_club_can_be_found_by_phone_and_invited(self):
+        other_leader = User.objects.create_user("+243810000056", email="l56@test.cd", password="Password123!", role=User.Role.LEADER)
+        other_club = Club.objects.create(name="Club voisin", zone="Matete", leader=other_leader, status=Club.Status.ACTIVE)
+        Membership.objects.filter(club=self.club, user=self.b).delete()
+        Membership.objects.create(club=other_club, user=self.b, role=Membership.Role.BORROWER, status=Membership.Status.ACTIVE)
+
+        client = APIClient()
+        client.force_authenticate(user=self.a)
+        found = client.get("/api/v1/users/co-borrower-by-phone/", {"phone": self.b.phone})
+        self.assertEqual(found.status_code, 200)
+        self.assertEqual(found.data["id"], self.b.id)
+
+        created = client.post("/api/v1/loans/", {
+            "club": str(self.club.id), "amount": "200000", "duration_code": "2m",
+            "repayment_frequency": "monthly", "purpose_id": str(self.purpose.id),
+            "estimated_income": "200000", "partners": [self.b.id],
+        }, format="json")
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(Loan.objects.get(pk=created.data["id"]).status, Loan.Status.PENDING_PARTNERS)
+
     def test_a_manual_share_shrinks_the_default_shares(self):
         """Une part saisie fige le montant ; les parts par defaut absorbent le reliquat."""
         client = APIClient()
@@ -491,7 +585,7 @@ class VisibilityTests(TestCase):
         Membership.objects.create(club=self.club, user=self.borrower, role=Membership.Role.BORROWER, status=Membership.Status.ACTIVE)
         validate_deposit(Deposit.objects.create(lender=self.lender, amount=Decimal("500000"), currency="CDF"), self.admin)
         self.loan = make_loan(self.club, self.borrower, amount=Decimal("300000"))
-        approve_loan(self.loan, self.admin)
+        approve_for_funding(self.loan, self.admin)
         review_funding(fund_loan(self.loan, self.lender, Decimal("300000")), self.admin, approve=True)
         self.loan.refresh_from_db()
         self.loan = disburse_loan(self.loan, self.admin)
@@ -507,6 +601,13 @@ class VisibilityTests(TestCase):
         self.assertIsNone(data["leader_commission_total"])
         self.assertEqual(data["fundings"], [])
         self.assertIsNone(data["funded_amount"])
+
+        overview = client.get(f"/api/v1/clubs/{self.club.id}/overview/")
+        self.assertEqual(overview.status_code, 200)
+        self.assertIsNone(overview.data["club"]["interest_rate"])
+        self.assertIsNone(overview.data["club"]["platform_fee_rate"])
+        self.assertIsNone(overview.data["club"]["leader_commission_rate"])
+        self.assertEqual(overview.data["club"]["finances"], {})
 
     def test_lender_sees_only_its_own_interest(self):
         client = APIClient()
@@ -546,7 +647,7 @@ class VisibilityTests(TestCase):
         self.lender.save(update_fields=["anonymous_lender"])
         self.assertEqual(self.lender.public_name, "Preteur anonyme")
         other = make_loan(self.club, self.borrower, amount=Decimal("50000"))
-        approve_loan(other, self.admin)
+        approve_for_funding(other, self.admin)
         fund_loan(other, self.lender, Decimal("50000"))
         client = APIClient()
         client.force_authenticate(user=self.admin)

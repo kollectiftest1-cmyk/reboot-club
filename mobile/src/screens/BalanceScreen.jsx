@@ -27,7 +27,7 @@ export function BalanceScreen() {
         <View style={styles.heroIcon}><Scale size={22} color={colors.white}/></View>
         <Text style={styles.heroLabel}>{admin ? "Fonds net en caisse" : "Capital disponible"}</Text>
         <Text style={styles.heroValue} numberOfLines={1} adjustsFontSizeToFit>{money(data.net_available, data.currency)}</Text>
-        <Text style={styles.heroNote}>{admin ? "Apres retraits, principal decaisse restant et frais encaisses." : "Disponible maintenant pour un placement ou un retrait."}</Text>
+        <Text style={styles.heroNote}>{admin ? "Apres recuperations, aides decaissees et frais communautaires encaisses." : "Disponible maintenant pour soutenir une aide ou demander une recuperation."}</Text>
       </View>
 
       {admin ? <View style={styles.availableBand}>
@@ -38,8 +38,8 @@ export function BalanceScreen() {
       <View>
         <Text style={styles.sectionTitle}>Calcul du net</Text>
         <View style={styles.equation}>
-          <EquationRow label="Total des depots" value={data.total_deposits} currency={data.currency} positive/>
-          <EquationRow label="Total des retraits" value={data.total_withdrawals} currency={data.currency}/>
+          <EquationRow label="Total des mises" value={data.total_deposits} currency={data.currency} positive/>
+          <EquationRow label="Total recupere" value={data.total_withdrawals} currency={data.currency}/>
           <EquationRow label={admin ? "Principal encore decaisse" : "Capital encore place"} value={data.principal_outstanding} currency={data.currency}/>
           <EquationRow label={admin ? "Commissions, frais et interets encaisses" : "Gains deja encaisses"} value={data.earnings_collected} currency={data.currency} positive/>
         </View>

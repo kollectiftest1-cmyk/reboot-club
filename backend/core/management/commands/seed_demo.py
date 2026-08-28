@@ -81,6 +81,7 @@ class Command(BaseCommand):
                 leader_commission_rate=club.leader_commission_rate,
             )
             LoanBorrower.objects.create(loan=loan, user=users["emprunteur"], is_primary=True, share_amount=loan.amount, status=LoanBorrower.Status.ACCEPTED, responded_at=timezone.now())
+            approve_loan(loan, users["chef"])
             approve_loan(loan, users["admin"])
             review_funding(fund_loan(loan, users["preteur"], Decimal("600000")), users["admin"], approve=True)
             loan.refresh_from_db()

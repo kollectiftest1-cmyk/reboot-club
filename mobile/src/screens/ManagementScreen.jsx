@@ -19,9 +19,10 @@ export function ManagementScreen() {
         { title: "Identites", note: "Controler les dossiers KYC et servir les comptes non KYC", icon: BadgeCheck, screen: "Identities", count: counts.identities },
         { title: "Reclamations", note: "Consulter, arbitrer et cloturer les dossiers", icon: MessageSquareWarning, screen: "Disputes", count: counts.disputes },
         { title: user.role === "admin" ? "Gestion des clubs" : "Identite du club", note: user.role === "admin" ? "CRUD, commissions, taux, limites et delais" : "Consulter les regles et modifier uniquement le nom", icon: Landmark, screen: "Settings" },
-        { title: "Validations", note: "Adhesions, prets, depots, retraits et placements", icon: CircleGauge, screen: "Validations", count: counts.validations?.total },
+        { title: "Validations", note: "Adhesions, prets, mises, recuperations et participations", icon: CircleGauge, screen: "Validations", count: counts.validations?.total },
     ];
-    if (user.role === "admin") items.unshift({ title: "Operations clients", note: "Depots, emprunts et placements assistes", icon: WalletCards, screen: "AdminOperations" });
+    if (user.role === "admin") items.unshift({ title: "Operations clients", note: "Mises, recuperations, emprunts et participations assistees", icon: WalletCards, screen: "AdminOperations" });
+    if (user.role === "admin") items.splice(1, 0, { title: "Validations par compte", note: "Selectionner un utilisateur et examiner tous ses dossiers", icon: BadgeCheck, screen: "AccountValidations", count: counts.validations?.loans });
     if (user.role === "admin") items.push({ title: "Encaissements", note: "Encaisser les echeances et designer les mandataires", icon: HandCoins, screen: "Collections", count: counts.collections });
     if (user.role === "admin") items.push({ title: "Configuration admin", note: "Taux, objets de pret et securite plateforme", icon: Settings2, screen: "PlatformSettings" });
     return <Screen><PageHeader eyebrow={user.role === "admin" ? "Administration plateforme" : "Direction du club"} title="Centre de gestion"/>

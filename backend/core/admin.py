@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
-from .models import AuditLog, Club, ClubMessage, Deposit, Dispute, EconomicActivity, Installment, Invitation, KYCApplication, Loan, LoanBorrower, LoanFunding, LoanPurpose, Membership, Notification, OTPChallenge, PlatformSettings, Repayment, User, Withdrawal
+from .models import AuditLog, Club, ClubMessage, ClubRateTier, Deposit, Dispute, EconomicActivity, Installment, Invitation, KYCApplication, Loan, LoanBorrower, LoanFunding, LoanPurpose, Membership, Notification, OTPChallenge, PlatformSettings, Repayment, User, Withdrawal
 
 
 @admin.register(User)
@@ -41,5 +41,6 @@ admin.site.register(KYCApplication)
 admin.site.register(EconomicActivity)
 admin.site.register(LoanPurpose)
 admin.site.register(LoanBorrower)
+admin.site.register(ClubRateTier)
 admin.site.site_header = "REBOOT CLUB - Administration"
 admin.site.site_title = "REBOOT CLUB"
