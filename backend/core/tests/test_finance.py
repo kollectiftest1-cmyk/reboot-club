@@ -4,7 +4,7 @@ import base64
 from django.test import TestCase
 from django.core.files.uploadedfile import SimpleUploadedFile
 
-from core.models import Club, Deposit, EconomicActivity, KYCApplication, Loan, LoanBorrower, LoanFunding, LoanPurpose, Membership, User, Withdrawal, allowed_frequencies, installment_count
+from core.models import BorrowerInstallment, Club, Deposit, EconomicActivity, KYCApplication, Loan, LoanBorrower, LoanFunding, LoanPurpose, Membership, Notification, User, Withdrawal, allowed_frequencies, installment_count
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -568,6 +568,196 @@ class CollectiveLoanTests(TestCase):
         self.assertEqual(client.post(f"/api/v1/loans/{loan.id}/respond/", {"accept": False, "reason": "Pas disponible"}, format="json").status_code, 200)
         loan.refresh_from_db()
         self.assertEqual(loan.status, Loan.Status.CANCELLED)
+
+    def test_initiator_can_replace_a_participant_before_validation(self):
+        client = APIClient()
+        client.force_authenticate(user=self.a)
+        created = client.post("/api/v1/loans/", {
+            "club": str(self.club.id), "amount": "200000", "duration_code": "2m",
+            "repayment_frequency": "monthly", "purpose_id": str(self.purpose.id),
+            "estimated_income": "200000", "partners": [str(self.b.id)],
+        }, format="json")
+        self.assertEqual(created.status_code, 201)
+        loan = Loan.objects.get(pk=created.data["id"])
+        old_share = loan.borrowers.get(user=self.b)
+
+        replaced = client.post(
+            f"/api/v1/loans/{loan.id}/replace-borrower/",
+            {"loan_borrower": str(old_share.id), "phone": self.c.phone}, format="json",
+        )
+        self.assertEqual(replaced.status_code, 201)
+        old_share.refresh_from_db()
+        new_share = loan.borrowers.get(user=self.c)
+        self.assertEqual(old_share.status, LoanBorrower.Status.PENDING)
+        self.assertEqual(new_share.status, LoanBorrower.Status.PENDING)
+        self.assertEqual(new_share.share_amount, old_share.share_amount)
+        self.assertTrue(Notification.objects.filter(recipient=self.b, kind="collective_replacement").exists())
+        self.assertTrue(Notification.objects.filter(recipient=self.c, kind="collective_replacement").exists())
+
+        client.force_authenticate(user=self.c)
+        accepted = client.post(f"/api/v1/loans/{loan.id}/respond/", {"accept": True}, format="json")
+        self.assertEqual(accepted.status_code, 200)
+        loan.refresh_from_db(); old_share.refresh_from_db(); new_share.refresh_from_db()
+        self.assertEqual(old_share.status, LoanBorrower.Status.REMOVED)
+        self.assertEqual(new_share.status, LoanBorrower.Status.ACCEPTED)
+        self.assertEqual(loan.status, Loan.Status.SUBMITTED)
+        self.assertEqual(old_share.share_amount, Decimal("0.00"))
+        self.assertEqual(sum((row.share_amount for row in loan.borrowers.all()), Decimal("0")), loan.amount)
+        self.assertTrue(Notification.objects.filter(recipient=self.b, title="Remplacement confirme").exists())
+
+        client.force_authenticate(user=self.b)
+        old_situation = client.get(f"/api/v1/loans/{loan.id}/")
+        self.assertEqual(old_situation.status_code, 200)
+        self.assertEqual(Decimal(old_situation.data["my_share"]["balance"]), Decimal("0.00"))
+        old_dashboard = client.get("/api/v1/dashboard/")
+        self.assertEqual(Decimal(old_dashboard.data["stats"]["loaned"]), Decimal("0.00"))
+
+        client.force_authenticate(user=self.admin)
+        old_account = client.get(f"/api/v1/users/{self.b.id}/overview/")
+        self.assertEqual(old_account.status_code, 200)
+        self.assertEqual(Decimal(old_account.data["summary"]["borrowed"]), Decimal("0.00"))
+        self.assertEqual(Decimal(old_account.data["summary"]["balance"]), Decimal("0.00"))
+
+    def test_replacement_refuses_an_existing_collective_participant(self):
+        client = APIClient()
+        client.force_authenticate(user=self.a)
+        created = client.post("/api/v1/loans/", {
+            "club": str(self.club.id), "amount": "200000", "duration_code": "2m",
+            "repayment_frequency": "monthly", "purpose_id": str(self.purpose.id),
+            "estimated_income": "200000", "partners": [str(self.b.id)],
+        }, format="json")
+        loan = Loan.objects.get(pk=created.data["id"])
+        old_share = loan.borrowers.get(user=self.b)
+
+        same_person = client.post(
+            f"/api/v1/loans/{loan.id}/replace-borrower/",
+            {"loan_borrower": str(old_share.id), "phone": self.b.phone}, format="json",
+        )
+        self.assertEqual(same_person.status_code, 400)
+        existing_initiator = client.post(
+            f"/api/v1/loans/{loan.id}/replace-borrower/",
+            {"loan_borrower": str(old_share.id), "phone": self.a.phone}, format="json",
+        )
+        self.assertEqual(existing_initiator.status_code, 400)
+        self.assertEqual(loan.borrowers.count(), 2)
+
+    def _disbursed_collective(self):
+        lender = User.objects.create_user("+243810000057", email="p57@test.cd", password="Password123!", role=User.Role.LENDER, kyc_verified=True, lender_profile_status=User.LenderProfileStatus.ACTIVE)
+        validate_deposit(Deposit.objects.create(lender=lender, amount=Decimal("400000"), currency="CDF"), self.admin)
+        loan = Loan.objects.create(
+            club=self.club, borrower=self.a, purpose="Stock collectif", amount=Decimal("300000"), currency="CDF",
+            duration_code="3m", duration_months=3, repayment_frequency="monthly", installment_total=3,
+            interest_rate=Decimal("20"), fee_rate=Decimal("10"), leader_commission_rate=Decimal("5"), is_collective=True,
+        )
+        first = LoanBorrower.objects.create(loan=loan, user=self.a, is_primary=True, share_amount=Decimal("100000"), status=LoanBorrower.Status.ACCEPTED)
+        second = LoanBorrower.objects.create(loan=loan, user=self.b, share_amount=Decimal("200000"), status=LoanBorrower.Status.ACCEPTED)
+        approve_for_funding(loan, self.admin)
+        review_funding(fund_loan(loan, lender, Decimal("300000")), self.admin, approve=True)
+        loan.refresh_from_db()
+        disburse_loan(loan, self.admin)
+        return loan, first, second
+
+    def test_disbursement_creates_and_collects_independent_debts(self):
+        loan, first, second = self._disbursed_collective()
+        self.assertEqual(first.installments.count(), 3)
+        self.assertEqual(second.installments.count(), 3)
+        self.assertEqual(sum(item.principal_due for item in first.installments.all()), Decimal("100000.00"))
+        self.assertEqual(sum(item.principal_due for item in second.installments.all()), Decimal("200000.00"))
+
+        record_repayment(loan, self.admin, Decimal("45000"), borrower=self.b)
+        first.refresh_from_db(); second.refresh_from_db(); loan.refresh_from_db()
+        self.assertEqual(first.total_paid, Decimal("0.00"))
+        self.assertEqual(second.total_paid, Decimal("45000.00"))
+        self.assertEqual(loan.total_paid, Decimal("45000.00"))
+        self.assertTrue(second.installments.filter(paid_amount__gt=0).exists())
+
+    def test_initiator_replaces_only_the_remaining_debt(self):
+        loan, _, second = self._disbursed_collective()
+        record_repayment(loan, self.admin, Decimal("45000"), borrower=self.b)
+        second.refresh_from_db()
+        previous_balance = second.debt_balance
+        client = APIClient(); client.force_authenticate(user=self.a)
+        requested = client.post(f"/api/v1/loans/{loan.id}/replace-borrower/", {"loan_borrower": str(second.id), "phone": self.c.phone}, format="json")
+        self.assertEqual(requested.status_code, 201)
+        client.force_authenticate(user=self.c)
+        accepted = client.post(f"/api/v1/loans/{loan.id}/respond/", {"accept": True}, format="json")
+        self.assertEqual(accepted.status_code, 200)
+        second.refresh_from_db()
+        replacement = loan.borrowers.get(user=self.c)
+        self.assertEqual(second.status, LoanBorrower.Status.REMOVED)
+        self.assertEqual(second.share_amount, Decimal("0.00"))
+        self.assertEqual(second.total_paid, Decimal("45000.00"))
+        self.assertEqual(replacement.status, LoanBorrower.Status.ACCEPTED)
+        self.assertEqual(replacement.debt_balance, previous_balance)
+        self.assertEqual(second.installments.exclude(status__in=[BorrowerInstallment.Status.PAID, BorrowerInstallment.Status.TRANSFERRED]).count(), 0)
+
+    def test_each_debt_can_have_its_own_collector(self):
+        loan, first, second = self._disbursed_collective()
+        collector = User.objects.create_user("+243810000058", email="m58@test.cd", password="Password123!", role=User.Role.COLLECTOR, collector_profile_active=True)
+        client = APIClient(); client.force_authenticate(user=self.admin)
+        assigned = client.post(f"/api/v1/loans/{loan.id}/assign-borrower-agent/", {"loan_borrower": str(second.id), "agent": collector.id}, format="json")
+        self.assertEqual(assigned.status_code, 200)
+        client.force_authenticate(user=collector)
+        paid = client.post(f"/api/v1/loans/{loan.id}/record-payment/", {"borrower": self.b.id, "amount": "10000", "payment_method": "cash"}, format="json")
+        self.assertEqual(paid.status_code, 201)
+        refused = client.post(f"/api/v1/loans/{loan.id}/record-payment/", {"borrower": self.a.id, "amount": "10000", "payment_method": "cash"}, format="json")
+        self.assertEqual(refused.status_code, 403)
+        first.refresh_from_db(); second.refresh_from_db()
+        self.assertEqual(first.total_paid, Decimal("0.00"))
+        self.assertEqual(second.total_paid, Decimal("10000.00"))
+
+    def test_collective_disbursement_assigns_each_debt_collector_atomically(self):
+        lender = User.objects.create_user("+243810000061", email="p61@test.cd", password="Password123!", role=User.Role.LENDER, kyc_verified=True, lender_profile_status=User.LenderProfileStatus.ACTIVE)
+        collector = User.objects.create_user("+243810000062", email="m62@test.cd", password="Password123!", role=User.Role.COLLECTOR, collector_profile_active=True)
+        validate_deposit(Deposit.objects.create(lender=lender, amount=Decimal("300000"), currency="CDF"), self.admin)
+        loan = Loan.objects.create(
+            club=self.club, borrower=self.a, purpose="Stock collectif", amount=Decimal("300000"), currency="CDF",
+            duration_code="3m", duration_months=3, repayment_frequency="monthly", installment_total=3,
+            interest_rate=Decimal("20"), fee_rate=Decimal("10"), leader_commission_rate=Decimal("5"), is_collective=True,
+        )
+        first = LoanBorrower.objects.create(loan=loan, user=self.a, is_primary=True, share_amount=Decimal("100000"), status=LoanBorrower.Status.ACCEPTED)
+        second = LoanBorrower.objects.create(loan=loan, user=self.b, share_amount=Decimal("200000"), status=LoanBorrower.Status.ACCEPTED)
+        approve_for_funding(loan, self.admin)
+        review_funding(fund_loan(loan, lender, Decimal("300000")), self.admin, approve=True)
+
+        client = APIClient(); client.force_authenticate(user=self.admin)
+        incomplete = client.post(f"/api/v1/loans/{loan.id}/disburse/", {
+            "borrower_agents": [{"loan_borrower": str(first.id), "agent": collector.id}],
+        }, format="json")
+        self.assertEqual(incomplete.status_code, 400)
+        loan.refresh_from_db()
+        self.assertEqual(loan.status, Loan.Status.APPROVED)
+        self.assertFalse(loan.installments.exists())
+
+        completed = client.post(f"/api/v1/loans/{loan.id}/disburse/", {
+            "borrower_agents": [
+                {"loan_borrower": str(first.id), "agent": collector.id},
+                {"loan_borrower": str(second.id), "agent": None},
+            ],
+        }, format="json")
+        self.assertEqual(completed.status_code, 200)
+        loan.refresh_from_db(); first.refresh_from_db(); second.refresh_from_db()
+        self.assertEqual(loan.status, Loan.Status.CURRENT)
+        self.assertIsNone(loan.collection_agent_id)
+        self.assertEqual(first.collection_agent_id, collector.id)
+        self.assertIsNone(second.collection_agent_id)
+        self.assertEqual(first.installments.count(), 3)
+        self.assertEqual(second.installments.count(), 3)
+        self.assertTrue(Notification.objects.filter(recipient=collector, kind="collection", data__share=str(first.id)).exists())
+
+    def test_leader_can_transfer_collected_commission_to_lender_wallet(self):
+        loan, _, _ = self._disbursed_collective()
+        record_repayment(loan, self.admin, Decimal("135000"), borrower=self.a)
+        self.leader.kyc_verified = True
+        self.leader.lender_profile_status = User.LenderProfileStatus.ACTIVE
+        self.leader.save(update_fields=["kyc_verified", "lender_profile_status"])
+        client = APIClient(); client.force_authenticate(user=self.leader)
+        wallet = client.get(f"/api/v1/clubs/{self.club.id}/leader-commissions/")
+        self.assertEqual(wallet.status_code, 200)
+        self.assertGreater(Decimal(wallet.data["available"]), Decimal("0"))
+        transferred = client.post(f"/api/v1/clubs/{self.club.id}/leader-commission-operation/", {"operation": "transfer_to_lender", "amount": "1000"}, format="json")
+        self.assertEqual(transferred.status_code, 201)
+        self.assertEqual(lender_total_available(self.leader), Decimal("1000.00"))
 
 
 class VisibilityTests(TestCase):

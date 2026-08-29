@@ -9,6 +9,7 @@ from rest_framework.exceptions import ValidationError
 
 from .models import (
     AuditLog,
+    BorrowerInstallment,
     Deposit,
     Installment,
     Loan,
@@ -89,6 +90,23 @@ def split_amount(total, parts):
     return values
 
 
+def split_proportionally(total, rows, weight="share_amount"):
+    """Repartit un montant au centime pres selon les quotes-parts."""
+    if not rows:
+        return []
+    total = money(total)
+    weight_total = sum((Decimal(getattr(row, weight)) for row in rows), Decimal("0"))
+    if weight_total <= 0:
+        return split_amount(total, len(rows))
+    values = []
+    allocated = Decimal("0")
+    for index, row in enumerate(rows):
+        value = total - allocated if index == len(rows) - 1 else money(total * Decimal(getattr(row, weight)) / weight_total)
+        values.append(value)
+        allocated += value
+    return values
+
+
 def loan_cost_breakdown(amount, interest_rate, fee_rate, leader_rate):
     """Les trois composantes du cout du credit, en % FIXE du capital emprunte."""
     amount = money(amount)
@@ -130,11 +148,36 @@ def is_platform_admin(user):
     return bool(getattr(user, "is_authenticated", False) and (user.is_superuser or user.role == User.Role.ADMIN))
 
 
-def can_collect(user, loan):
-    """Encaissement : administrateur, ou mandataire designe sur ce pret precis."""
+def can_collect(user, loan, loan_borrower=None):
+    """Encaissement : administrateur, ou mandataire de la dette concernee."""
     if is_platform_admin(user):
         return True
+    if loan_borrower is not None and loan.is_collective:
+        return bool(loan_borrower.collection_agent_id == user.id)
     return bool(loan.collection_agent_id and loan.collection_agent_id == user.id)
+
+
+def leader_commission_wallet(leader, club=None):
+    """Commissions encaissees, reservees et disponibles pour un chef de club."""
+    clubs = leader.managed_clubs.all()
+    if club is not None:
+        clubs = clubs.filter(pk=club.pk)
+    collected = Repayment.objects.filter(
+        loan__club__in=clubs, status=Repayment.Status.VALIDATED,
+    ).aggregate(total=Sum("leader_commission_paid"))["total"] or Decimal("0")
+    operations = Withdrawal.objects.filter(lender=leader, source=Withdrawal.Source.LEADER_COMMISSION)
+    if club is not None:
+        operations = operations.filter(club=club)
+    reserved = operations.filter(status__in=[
+        Withdrawal.Status.SUBMITTED, Withdrawal.Status.REVIEW, Withdrawal.Status.APPROVED, Withdrawal.Status.PAID,
+    ]).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    paid = operations.filter(status=Withdrawal.Status.PAID).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    return {
+        "collected": money(collected),
+        "reserved": money(reserved),
+        "paid": money(paid),
+        "available": money(max(collected - reserved, Decimal("0"))),
+    }
 
 
 def club_finances(club):
@@ -244,7 +287,7 @@ def sync_collective_shares(loan, shares=None):
 
 
 def collective_is_ready(loan):
-    rows = list(loan.borrowers.all())
+    rows = list(loan.borrowers.exclude(status__in=[LoanBorrower.Status.DECLINED, LoanBorrower.Status.REMOVED]))
     if not rows:
         return False
     if any(row.status != LoanBorrower.Status.ACCEPTED for row in rows):
@@ -343,9 +386,15 @@ def lender_engaged_capital(lender):
 def lender_total_available(lender):
     """Capital libre d'un preteur : portefeuille global, hors club."""
     deposits = Deposit.objects.filter(lender=lender, status=Deposit.Status.VALIDATED).aggregate(total=Sum("amount"))["total"] or Decimal("0")
-    withdrawals = Withdrawal.objects.filter(lender=lender, status=Withdrawal.Status.PAID).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    withdrawals = Withdrawal.objects.filter(
+        lender=lender, source=Withdrawal.Source.LENDER, status=Withdrawal.Status.PAID,
+    ).aggregate(total=Sum("amount"))["total"] or Decimal("0")
     earned_interest = LoanFunding.objects.filter(lender=lender).aggregate(total=Sum("interest_earned"))["total"] or Decimal("0")
-    return money(max(deposits + earned_interest - withdrawals - lender_engaged_capital(lender), Decimal("0")))
+    commission_transfers = Withdrawal.objects.filter(
+        lender=lender, source=Withdrawal.Source.LEADER_COMMISSION,
+        destination=Withdrawal.Destination.LENDER_WALLET, status=Withdrawal.Status.PAID,
+    ).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    return money(max(deposits + commission_transfers + earned_interest - withdrawals - lender_engaged_capital(lender), Decimal("0")))
 
 
 def lender_available(club, lender):
@@ -451,7 +500,10 @@ def disburse_loan(loan, actor):
     if loan.status != Loan.Status.APPROVED:
         raise ValidationError("Seul un pret valide peut etre decaisse.")
     if loan.funding_remaining > 0:
-        raise ValidationError("Le financement doit atteindre 100 % avant le decaissement.")
+        raise ValidationError(
+            f"Financement incomplet : {money(loan.funded_amount)} {loan.currency} valides sur "
+            f"{money(loan.amount)} {loan.currency}. Reliquat : {money(loan.funding_remaining)} {loan.currency}."
+        )
     disbursed_at = timezone.now()
     today = timezone.localdate(disbursed_at)
     dates = installment_dates(today, loan.duration_code, loan.repayment_frequency)
@@ -467,13 +519,30 @@ def disburse_loan(loan, actor):
             principal_due=principals[index], interest_due=interests[index],
             fee_due=fees[index], leader_commission_due=leader_fees[index],
         )
+    shares = list(loan.borrowers.filter(status=LoanBorrower.Status.ACCEPTED).select_related("user"))
+    if loan.is_collective and shares:
+        BorrowerInstallment.objects.filter(loan_borrower__loan=loan).delete()
+        principal_totals = split_proportionally(loan.amount, shares)
+        interest_totals = split_proportionally(loan.interest_total, shares)
+        fee_totals = split_proportionally(loan.fee_total, shares)
+        leader_totals = split_proportionally(loan.leader_commission_total, shares)
+        for position, share in enumerate(shares):
+            share_principals = split_amount(principal_totals[position], count)
+            share_interests = split_amount(interest_totals[position], count)
+            share_fees = split_amount(fee_totals[position], count)
+            share_leader_fees = split_amount(leader_totals[position], count)
+            for index, due_date in enumerate(dates):
+                BorrowerInstallment.objects.create(
+                    loan_borrower=share, number=index + 1, due_date=due_date,
+                    principal_due=share_principals[index], interest_due=share_interests[index],
+                    fee_due=share_fees[index], leader_commission_due=share_leader_fees[index],
+                )
     loan.installment_total = count
     loan.status = Loan.Status.CURRENT
     loan.disbursed_at = disbursed_at
     loan.scheduled_disbursement_date = today
     loan.save(update_fields=["status", "installment_total", "disbursed_at", "scheduled_disbursement_date", "updated_at"])
     audit(actor, "loan.disbursed", loan, new={"status": loan.status, "installments": count, "disbursed_at": disbursed_at.isoformat()})
-    shares = list(loan.borrowers.select_related("user"))
     if shares:
         for row in shares:
             notify(row.user, "Pret decaisse", f"Votre part de {row.share_amount} {loan.currency} a ete decaissee.", "loan", {"loan": str(loan.id)})
@@ -485,30 +554,165 @@ def disburse_loan(loan, actor):
     return loan
 
 
+def _allocate_borrower_payment(share, amount):
+    """Impute un versement sur l'echeancier propre d'un co-emprunteur."""
+    remaining = amount
+    totals = {key: Decimal("0") for key in ["principal", "interest", "fee", "leader_commission", "penalty"]}
+    for installment in share.installments.select_for_update().exclude(
+        status__in=[BorrowerInstallment.Status.PAID, BorrowerInstallment.Status.TRANSFERRED],
+    ):
+        for key in ["penalty", "fee", "leader_commission", "interest", "principal"]:
+            due_field = f"{key}_due"
+            paid_field = f"{key}_paid"
+            allocation = min(remaining, max(getattr(installment, due_field) - getattr(installment, paid_field), Decimal("0")))
+            setattr(installment, paid_field, getattr(installment, paid_field) + allocation)
+            installment.paid_amount += allocation
+            totals[key] += allocation
+            remaining -= allocation
+            if remaining <= 0:
+                break
+        installment.status = BorrowerInstallment.Status.PAID if installment.paid_amount >= installment.total_due_amount else BorrowerInstallment.Status.PARTIAL
+        installment.save(update_fields=[
+            "principal_paid", "interest_paid", "fee_paid", "leader_commission_paid", "penalty_paid",
+            "paid_amount", "status", "updated_at",
+        ])
+        if remaining <= 0:
+            break
+    return totals
+
+
+@transaction.atomic
+def request_borrower_replacement(loan, source, replacement, actor):
+    """Demande le transfert du solde d'une dette collective a une autre personne."""
+    loan = Loan.objects.select_for_update(of=("self",)).get(pk=loan.pk)
+    source = LoanBorrower.objects.select_for_update().select_related("user").get(pk=source.pk, loan=loan)
+    if actor != loan.borrower and not is_platform_admin(actor):
+        raise ValidationError("Seul l'initiateur du pret collectif peut gerer les participants.")
+    before_disbursement = loan.status in [Loan.Status.PENDING_PARTNERS, Loan.Status.SUBMITTED, Loan.Status.REVIEW]
+    active_repayment = loan.status in [Loan.Status.CURRENT, Loan.Status.LATE, Loan.Status.DISPUTED]
+    if not loan.is_collective or not (before_disbursement or active_repayment):
+        raise ValidationError("Ce pret collectif ne permet pas de modifier ses participants a cette etape.")
+    valid_source_statuses = [LoanBorrower.Status.ACCEPTED, LoanBorrower.Status.PENDING] if before_disbursement else [LoanBorrower.Status.ACCEPTED]
+    if source.is_primary or source.status not in valid_source_statuses:
+        raise ValidationError("L'initiateur ne peut pas etre retire et cette dette doit etre active.")
+    if replacement == source.user:
+        raise ValidationError("Selectionnez une autre personne : ce numero appartient deja au participant a remplacer.")
+    if loan.borrowers.filter(user=replacement).exists():
+        raise ValidationError("Cette personne figure deja dans cet emprunt collectif et ne peut pas etre ajoutee une seconde fois.")
+    if source.replacement_requests.filter(status=LoanBorrower.Status.PENDING).exists():
+        raise ValidationError("Une demande de remplacement attend deja une reponse pour cette dette.")
+    if not replacement.has_valid_kyc or User.Role.BORROWER not in replacement.available_profiles:
+        raise ValidationError("Le remplacant doit avoir un KYC valide et un profil emprunteur actif.")
+    if active_repayment and source.debt_balance <= 0:
+        raise ValidationError("Cette dette est deja entierement remboursee.")
+    pending = LoanBorrower.objects.create(
+        loan=loan, user=replacement,
+        share_amount=source.share_amount if before_disbursement else max(source.share_amount - source.principal_repaid, Decimal("0")),
+        share_is_manual=True, status=LoanBorrower.Status.PENDING, replacement_for=source,
+    )
+    if before_disbursement:
+        # L'ancien participant reste en place jusqu'a la reponse du nouveau. Cela
+        # permet de conserver la repartition initiale si le remplacement est refuse.
+        loan.status = Loan.Status.PENDING_PARTNERS
+        loan.approved_by = None
+        loan.approved_at = None
+        loan.decision_reason = "La liste des co-emprunteurs a ete modifiee par l'initiateur."
+        loan.save(update_fields=["status", "approved_by", "approved_at", "decision_reason", "updated_at"])
+    audit(actor, "loan.borrower_replacement_requested", pending, new={"source": str(source.user_id), "replacement": str(replacement.id)})
+    notify(
+        source.user, "Participation collective modifiee",
+        f"{actor.display_name} a propose votre remplacement sur le pret collectif {loan.reference}. Vous restez participant jusqu'a l'acceptation du nouveau membre." if before_disbursement else f"{actor.display_name} a demande le transfert de votre solde sur {loan.reference} a une autre personne. Vous restez responsable jusqu'a son acceptation.",
+        "collective_replacement", {"loan": str(loan.id), "share": str(source.id)},
+    )
+    notify(
+        replacement, "Invitation a un emprunt collectif" if before_disbursement else "Reprise d'une dette collective",
+        f"{actor.display_name} vous propose une part de {source.share_amount} {loan.currency} sur {loan.reference}." if before_disbursement else f"{actor.display_name} vous propose de reprendre le solde de {source.debt_balance} {loan.currency} sur {loan.reference}.",
+        "collective_replacement", {"loan": str(loan.id), "share": str(pending.id)},
+    )
+    return pending
+
+
+@transaction.atomic
+def accept_borrower_replacement(pending, actor):
+    """Transfere seulement les montants encore dus et conserve l'historique du sortant."""
+    pending = LoanBorrower.objects.select_for_update().select_related("loan", "replacement_for", "user").get(pk=pending.pk)
+    source = LoanBorrower.objects.select_for_update().select_related("user").get(pk=pending.replacement_for_id)
+    if pending.user != actor or pending.status != LoanBorrower.Status.PENDING:
+        raise ValidationError("Cette demande de remplacement ne peut plus etre acceptee.")
+    if not pending.loan.disbursed_at:
+        transferred_amount = source.share_amount
+        pending.status = LoanBorrower.Status.ACCEPTED
+        pending.responded_at = timezone.now()
+        pending.save(update_fields=["status", "responded_at", "updated_at"])
+        source.share_amount = Decimal("0")
+        source.status = LoanBorrower.Status.REMOVED
+        source.removed_at = timezone.now()
+        source.removed_by = pending.loan.borrower
+        source.decision_reason = f"Remplace par {pending.user.display_name} avant validation du pret."
+        source.save(update_fields=["share_amount", "status", "removed_at", "removed_by", "decision_reason", "updated_at"])
+        audit(actor, "loan.borrower_replaced_before_disbursement", pending, new={"source": str(source.user_id), "amount": str(transferred_amount)})
+        notify(source.user, "Remplacement confirme", f"{pending.user.display_name} a accepte votre part sur le pret collectif {pending.loan.reference}. Vous ne participez plus a cette demande.", "collective_replacement", {"loan": str(pending.loan_id)})
+        return pending
+    pending.share_amount = Decimal("0")
+    for old in source.installments.select_for_update().all():
+        if old.status in [BorrowerInstallment.Status.PAID, BorrowerInstallment.Status.TRANSFERRED]:
+            continue
+        remaining_components = {
+            key: max(getattr(old, f"{key}_due") - getattr(old, f"{key}_paid"), Decimal("0"))
+            for key in ["principal", "interest", "fee", "leader_commission", "penalty"]
+        }
+        pending.share_amount += remaining_components["principal"]
+        BorrowerInstallment.objects.create(
+            loan_borrower=pending, number=old.number, due_date=old.due_date,
+            principal_due=remaining_components["principal"], interest_due=remaining_components["interest"],
+            fee_due=remaining_components["fee"], leader_commission_due=remaining_components["leader_commission"],
+            penalty_due=remaining_components["penalty"], status=BorrowerInstallment.Status.LATE if old.due_date < timezone.localdate() else BorrowerInstallment.Status.UPCOMING,
+        )
+        old.status = BorrowerInstallment.Status.TRANSFERRED
+        old.save(update_fields=["status", "updated_at"])
+    pending.share_amount = money(pending.share_amount)
+    pending.status = LoanBorrower.Status.ACCEPTED
+    pending.responded_at = timezone.now()
+    pending.save(update_fields=["share_amount", "status", "responded_at", "updated_at"])
+    source.share_amount = Decimal("0")
+    source.status = LoanBorrower.Status.REMOVED
+    source.removed_at = timezone.now()
+    source.removed_by = pending.loan.borrower
+    source.save(update_fields=["share_amount", "status", "removed_at", "removed_by", "updated_at"])
+    audit(actor, "loan.borrower_replaced", pending, new={"source": str(source.user_id), "amount": str(pending.share_amount)})
+    notify(source.user, "Participation transferee", f"Le solde restant de votre dette sur {pending.loan.reference} a ete repris par {pending.user.display_name}.", "collective_replacement", {"loan": str(pending.loan_id)})
+    return pending
+
+
 @transaction.atomic
 def record_repayment(loan, actor, amount, payment_method="cash", borrower=None):
-    """Encaissement d'une echeance : administrateur ou mandataire designe."""
+    """Encaissement d'une dette, independamment pour chaque co-emprunteur."""
     loan = Loan.objects.select_for_update(of=("self",)).select_related("club", "borrower", "club__leader").get(pk=loan.pk)
-    if not can_collect(actor, loan):
-        raise ValidationError("Seul l'administrateur ou le mandataire designe peut encaisser ce pret.")
     if loan.status not in ACTIVE_LOAN_STATUSES:
         raise ValidationError("Ce pret n'accepte pas de remboursement.")
-    amount = money(amount)
-    if amount <= 0 or amount > loan.balance:
-        raise ValidationError("Le montant doit etre positif et ne pas depasser le solde.")
     share = None
-    if borrower is not None:
-        share = loan.borrowers.select_for_update().filter(user=borrower).first()
+    if loan.is_collective:
+        if borrower is None:
+            assigned = loan.borrowers.filter(collection_agent=actor, status=LoanBorrower.Status.ACCEPTED)
+            if not is_platform_admin(actor) and assigned.count() == 1:
+                borrower = assigned.first().user
+            else:
+                raise ValidationError("Selectionnez le co-emprunteur qui effectue ce remboursement.")
+        share = loan.borrowers.select_for_update().filter(user=borrower, status=LoanBorrower.Status.ACCEPTED).first()
         if share is None:
-            raise ValidationError("Cette personne n'est pas co-emprunteur de ce pret.")
-        share_due = money(share.share_amount * loan.total_due / loan.amount) if loan.amount else Decimal("0")
-        if amount > money(share_due - share.total_paid):
-            raise ValidationError("Le montant depasse la quote-part restante de ce co-emprunteur.")
+            raise ValidationError("Cette personne n'a pas de dette active sur ce pret.")
+    if not can_collect(actor, loan, share):
+        raise ValidationError("Seul l'administrateur ou le mandataire de cette dette peut encaisser ce remboursement.")
+    amount = money(amount)
+    maximum = share.debt_balance if share is not None else loan.balance
+    if amount <= 0 or amount > maximum:
+        raise ValidationError(f"Le montant doit etre positif et ne pas depasser le solde de {maximum} {loan.currency}.")
     payer = borrower or loan.borrower
     repayment = Repayment.objects.create(
-        loan=loan, payer=payer, recorded_by=actor, amount=amount,
+        loan=loan, loan_borrower=share, payer=payer, recorded_by=actor, amount=amount,
         currency=loan.currency, payment_method=payment_method,
     )
+    share_totals = _allocate_borrower_payment(share, amount) if share is not None and share.installments.exists() else None
     remaining = amount
     totals = {"principal": Decimal("0"), "interest": Decimal("0"), "fee": Decimal("0"), "leader_commission": Decimal("0"), "penalty": Decimal("0")}
     for installment in loan.installments.exclude(status=Installment.Status.PAID).select_for_update():
@@ -533,6 +737,8 @@ def record_repayment(loan, actor, amount, payment_method="cash", borrower=None):
         installment.save(update_fields=["paid_amount", "status", "updated_at"])
         if remaining <= 0:
             break
+    if share_totals is not None:
+        totals = share_totals
     repayment.principal_paid = totals["principal"]
     repayment.interest_paid = totals["interest"]
     repayment.fee_paid = totals["fee"]
@@ -612,4 +818,27 @@ def process_due_installments(today=None):
             if not already_sent:
                 notify(loan.borrower, "Echeance prochaine", f"Votre paiement de {installment.total_due} {loan.currency} arrive le {installment.due_date:%d/%m/%Y}.", "due_reminder", {"installment": str(installment.id)})
                 counters["reminders"] += 1
+    borrower_installments = BorrowerInstallment.objects.select_for_update(of=("self",)).select_related(
+        "loan_borrower", "loan_borrower__loan", "loan_borrower__user", "loan_borrower__collection_agent",
+    ).filter(
+        loan_borrower__status=LoanBorrower.Status.ACCEPTED,
+        loan_borrower__loan__status__in=ACTIVE_LOAN_STATUSES,
+        status__in=[BorrowerInstallment.Status.UPCOMING, BorrowerInstallment.Status.DUE, BorrowerInstallment.Status.PARTIAL, BorrowerInstallment.Status.LATE],
+    )
+    for installment in borrower_installments:
+        share = installment.loan_borrower
+        loan = share.loan
+        if installment.due_date < today and installment.remaining_due > 0:
+            first_late = installment.status != BorrowerInstallment.Status.LATE
+            installment.status = BorrowerInstallment.Status.LATE
+            installment.save(update_fields=["status", "updated_at"])
+            if first_late:
+                notify(share.user, "Votre echeance est en retard", f"Votre echeance {installment.number} sur {loan.reference} presente un solde de {installment.remaining_due} {loan.currency}.", "late", {"loan": str(loan.id), "share": str(share.id)})
+                if share.collection_agent_id:
+                    notify(share.collection_agent, "Dette individuelle en retard", f"{share.user.display_name} est en retard sur {loan.reference}.", "collection", {"loan": str(loan.id), "share": str(share.id)})
+        elif installment.due_date == today and installment.status == BorrowerInstallment.Status.UPCOMING:
+            installment.status = BorrowerInstallment.Status.DUE
+            installment.save(update_fields=["status", "updated_at"])
+            if share.collection_agent_id:
+                notify(share.collection_agent, "Encaissement individuel du jour", f"L'echeance de {share.user.display_name} sur {loan.reference} est due aujourd'hui.", "collection", {"loan": str(loan.id), "share": str(share.id)})
     return counters

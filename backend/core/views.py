@@ -28,7 +28,7 @@ from .models import (
 from .permissions import IsPlatformAdmin
 from .serializers import (
     AssistedDepositSerializer, AssistedFundingSerializer, AssistedLoanSerializer, AssistedWithdrawalSerializer, AuditLogSerializer,
-    ClubMessageSerializer, ClubRateTierSerializer, ClubSerializer, CollectionAgentSerializer, CollectiveResponseSerializer, DepositSerializer, DisputeSerializer,
+    ClubMessageSerializer, ClubRateTierSerializer, ClubSerializer, CollectionAgentSerializer, CollectiveResponseSerializer, DepositSerializer, DisbursementSerializer, DisputeSerializer,
     FundingContributionSerializer, FundingReviewSerializer, KYCApplicationSerializer, LoanBorrowerSerializer, LoanFundingSerializer,
     LoanPurposeSerializer, LoanSerializer, LoanSimulationSerializer, MembershipSerializer,
     EconomicActivitySerializer, InvitationSerializer, ManagedUserSerializer, ManagedUserUpdateSerializer, NotificationSerializer,
@@ -37,8 +37,9 @@ from .serializers import (
 )
 from .services import (
     add_months, approve_loan, audit, can_collect, club_finances, collective_is_ready, disburse_loan, fund_loan,
-    installment_dates, is_platform_admin, lender_total_available, loan_cost_breakdown, money, notify,
-    platform_admins, record_repayment, review_funding, submit_loan, sync_collective_shares, validate_deposit,
+    accept_borrower_replacement, installment_dates, is_platform_admin, leader_commission_wallet, lender_total_available,
+    loan_cost_breakdown, money, notify, platform_admins, record_repayment, request_borrower_replacement,
+    review_funding, submit_loan, sync_collective_shares, validate_deposit,
 )
 
 
@@ -77,11 +78,11 @@ def financial_balance(user):
         repayments = Repayment.objects.filter(status=Repayment.Status.VALIDATED).select_related("loan", "loan__club")
     else:
         deposits = Deposit.objects.filter(lender=user, status=Deposit.Status.VALIDATED).select_related("club", "lender")
-        withdrawal_history = Withdrawal.objects.filter(lender=user).select_related("club", "lender")
+        withdrawal_history = Withdrawal.objects.filter(lender=user, source=Withdrawal.Source.LENDER).select_related("club", "lender")
         fundings = LoanFunding.objects.filter(lender=user).select_related("loan", "loan__club", "lender")
         repayments = Repayment.objects.none()
 
-    withdrawals = withdrawal_history.filter(status=Withdrawal.Status.PAID)
+    withdrawals = withdrawal_history.filter(status=Withdrawal.Status.PAID).exclude(destination=Withdrawal.Destination.LENDER_WALLET)
     total_deposits = deposits.aggregate(total=Sum("amount"))["total"] or Decimal("0")
     total_withdrawals = withdrawals.aggregate(total=Sum("amount"))["total"] or Decimal("0")
     funding_rows = list(fundings)
@@ -309,13 +310,24 @@ def dashboard(request):
         deposits = Deposit.objects.filter(lender=request.user, status=Deposit.Status.VALIDATED)
         loans = Loan.objects.filter(fundings__lender=request.user).distinct()
     elif profile == User.Role.BORROWER:
-        loans = loans.filter(Q(borrower=request.user) | Q(borrowers__user=request.user)).distinct()
+        loans = loans.filter(
+            Q(borrower=request.user) |
+            Q(borrowers__user=request.user, borrowers__status__in=[LoanBorrower.Status.ACCEPTED, LoanBorrower.Status.PENDING])
+        ).distinct()
     total_deposits = deposits.aggregate(total=Sum("amount"))["total"] or Decimal("0")
-    total_due = loans.aggregate(total=Sum("total_due"))["total"] or Decimal("0")
-    total_paid = loans.aggregate(total=Sum("total_paid"))["total"] or Decimal("0")
+    if profile == User.Role.BORROWER and not is_admin:
+        personal_shares = LoanBorrower.objects.filter(
+            loan__in=loans, user=request.user, status=LoanBorrower.Status.ACCEPTED,
+        ).select_related("loan").prefetch_related("installments")
+        total_due = sum((share.debt_total for share in personal_shares), Decimal("0"))
+        total_paid = sum((share.total_paid for share in personal_shares), Decimal("0"))
+    else:
+        total_due = loans.aggregate(total=Sum("total_due"))["total"] or Decimal("0")
+        total_paid = loans.aggregate(total=Sum("total_paid"))["total"] or Decimal("0")
     interest_earned = request.user.loan_fundings.aggregate(total=Sum("interest_earned"))["total"] or Decimal("0") if profile == User.Role.LENDER else Decimal("0")
     lender_placed = request.user.loan_fundings.aggregate(total=Sum("amount"))["total"] or Decimal("0") if profile == User.Role.LENDER else Decimal("0")
     lender_free = lender_total_available(request.user) if profile == User.Role.LENDER else Decimal("0")
+    leader_wallet = leader_commission_wallet(request.user) if profile == User.Role.LEADER else None
     membership_invitations = Membership.objects.filter(
         user=request.user, status=Membership.Status.PENDING,
         member_approved_at__isnull=True,
@@ -340,6 +352,11 @@ def dashboard(request):
             funding_amount = lender_fundings.get(repayment.loan_id)
             if key in gain_map and funding_amount and repayment.loan.amount:
                 gain_map[key] += money(repayment.interest_paid * funding_amount / repayment.loan.amount)
+    elif profile == User.Role.LEADER:
+        for repayment in gain_repayments.filter(loan__club__leader=request.user):
+            key = repayment.created_at.strftime("%Y-%m")
+            if key in gain_map:
+                gain_map[key] += repayment.leader_commission_paid
     gain_history = [{
         "key": month.strftime("%Y-%m"), "label": month.strftime("%m/%y"),
         "amount": str(money(gain_map[month.strftime("%Y-%m")])),
@@ -395,6 +412,9 @@ def dashboard(request):
             "clubs": clubs.count(), "members": Membership.objects.filter(club__in=clubs, status=Membership.Status.ACTIVE).values("user").distinct().count(),
             "deposits": balance["total_deposits"] if profile == User.Role.LENDER and balance else str(money(total_deposits)), "loaned": str(money(total_due)), "repaid": str(money(total_paid)),
             "interest_earned": str(money(interest_earned)), "placed": str(money(lender_placed)), "available_capital": str(money(lender_free)),
+            "leader_commission_collected": str(leader_wallet["collected"]) if leader_wallet else "0.00",
+            "leader_commission_available": str(leader_wallet["available"]) if leader_wallet else "0.00",
+            "leader_commission_recovered": str(leader_wallet["paid"]) if leader_wallet else "0.00",
             "withdrawals": balance["total_withdrawals"] if balance else "0.00",
             "ongoing_placements": balance["ongoing_placements"] if balance else "0.00",
             "ongoing_placements_count": balance["ongoing_count"] if balance else 0,
@@ -467,9 +487,11 @@ def activity_counts(request):
     collections = 0
     if request.user.current_profile == User.Role.LENDER:
         loan_offers = Loan.objects.filter(status=Loan.Status.APPROVED, funding_completed_at__isnull=True, club__status=Club.Status.ACTIVE).exclude(fundings__lender=request.user).count()
-    collective_requests = LoanBorrower.objects.filter(user=request.user, status=LoanBorrower.Status.PENDING, loan__status=Loan.Status.PENDING_PARTNERS).count()
+    collective_requests = LoanBorrower.objects.filter(user=request.user, status=LoanBorrower.Status.PENDING).filter(
+        Q(loan__status=Loan.Status.PENDING_PARTNERS) | Q(replacement_for__isnull=False),
+    ).count()
     if not admin:
-        collections = Loan.objects.filter(collection_agent=request.user, status__in=[Loan.Status.CURRENT, Loan.Status.LATE]).count()
+        collections = LoanBorrower.objects.filter(collection_agent=request.user, status=LoanBorrower.Status.ACCEPTED, loan__status__in=[Loan.Status.CURRENT, Loan.Status.LATE]).count() + Loan.objects.filter(collection_agent=request.user, is_collective=False, status__in=[Loan.Status.CURRENT, Loan.Status.LATE]).count()
     notifications = request.user.notifications.filter(read_at__isnull=True).count()
     return Response({
         "chat": unread_chat, "notifications": notifications, "membership_requests": membership_requests,
@@ -613,6 +635,74 @@ class ClubViewSet(viewsets.ModelViewSet):
             },
         })
 
+    @action(detail=True, methods=["get"], url_path="leader-commissions")
+    def leader_commissions(self, request, pk=None):
+        club = self.get_object()
+        if not is_platform_admin(request.user) and club.leader_id != request.user.id:
+            return deny("Ces commissions sont reservees au chef de ce club.")
+        leader = club.leader
+        if not leader:
+            return Response({"detail": "Ce club n'a pas encore de chef."}, status=400)
+        wallet = leader_commission_wallet(leader, club)
+        commission_loans = Loan.objects.filter(club=club).annotate(
+            commission_collected=Sum("repayments__leader_commission_paid", filter=Q(repayments__status=Repayment.Status.VALIDATED)),
+        ).order_by("-created_at")
+        return Response({
+            **{key: str(value) for key, value in wallet.items()},
+            "currency": club.currency,
+            "club": str(club.id),
+            "club_name": club.name,
+            "by_loan": [{
+                "loan": str(item.id), "reference": item.reference, "purpose": item.purpose,
+                "currency": item.currency, "expected": str(money(item.leader_commission_total)),
+                "collected": str(money(item.commission_collected or 0)), "status": item.status,
+            } for item in commission_loans],
+            "operations": WithdrawalSerializer(
+                Withdrawal.objects.filter(lender=leader, club=club, source=Withdrawal.Source.LEADER_COMMISSION).order_by("-created_at")[:20],
+                many=True, context={"request": request},
+            ).data,
+        })
+
+    @action(detail=True, methods=["post"], url_path="leader-commission-operation")
+    @transaction.atomic
+    def leader_commission_operation(self, request, pk=None):
+        club = self.get_object()
+        if club.leader_id != request.user.id:
+            return deny("Seul le chef de ce club peut utiliser ses commissions.")
+        operation = request.data.get("operation")
+        if operation not in ["withdraw", "transfer_to_lender"]:
+            return Response({"operation": "Choisissez une recuperation ou un transfert vers le compte preteur."}, status=400)
+        try:
+            amount = money(request.data.get("amount", 0))
+        except Exception:
+            return Response({"amount": "Montant invalide."}, status=400)
+        available = leader_commission_wallet(request.user, club)["available"]
+        if amount <= 0 or amount > available:
+            return Response({"amount": f"Le maximum disponible est de {available} {club.currency}."}, status=400)
+        if operation == "transfer_to_lender" and (
+            request.user.lender_profile_status != User.LenderProfileStatus.ACTIVE or not request.user.has_valid_kyc
+        ):
+            return Response({"detail": "Un profil preteur actif et un KYC valide sont obligatoires pour ce transfert."}, status=400)
+        withdrawal = Withdrawal.objects.create(
+            club=club, lender=request.user, source=Withdrawal.Source.LEADER_COMMISSION,
+            destination=Withdrawal.Destination.LENDER_WALLET if operation == "transfer_to_lender" else Withdrawal.Destination.CASH,
+            amount=amount, currency=club.currency,
+            status=Withdrawal.Status.PAID if operation == "transfer_to_lender" else Withdrawal.Status.SUBMITTED,
+            decision_reason="Transfert interne vers le compte preteur." if operation == "transfer_to_lender" else "",
+            reviewed_by=request.user if operation == "transfer_to_lender" else None,
+        )
+        if operation == "transfer_to_lender":
+            title = "Commission transferee"
+            message = f"{amount} {club.currency} sont maintenant disponibles dans votre compte preteur."
+        else:
+            for admin in platform_admins():
+                notify(admin, "Recuperation de commission a valider", f"{request.user.display_name} demande {amount} {club.currency} sur les commissions de {club.name}.", "withdrawal", {"withdrawal": str(withdrawal.id)})
+            title = "Demande de recuperation envoyee"
+            message = "L'administration doit maintenant traiter votre demande."
+        audit(request.user, f"leader_commission.{operation}", withdrawal, new={"amount": str(amount), "club": str(club.id)})
+        notify(request.user, title, message, "leader_commission", {"club": str(club.id), "withdrawal": str(withdrawal.id)})
+        return Response({"message": message, "operation": WithdrawalSerializer(withdrawal, context={"request": request}).data, "wallet": {key: str(value) for key, value in leader_commission_wallet(request.user, club).items()}}, status=201)
+
 
 class ClubRateTierViewSet(viewsets.ModelViewSet):
     serializer_class = ClubRateTierSerializer
@@ -673,6 +763,17 @@ class UserViewSet(viewsets.ModelViewSet):
         user = serializer.save()
         audit(self.request.user, "user.created", user, new={"phone": user.phone, "role": user.role})
         notify(user, "Compte cree", f"Votre compte REBOOT CLUB a ete cree par {self.request.user.display_name}.", "account_created")
+
+    @action(detail=False, methods=["get"], url_path="collectors")
+    def collectors(self, request):
+        """Liste unique des comptes autorises a recevoir un mandat d'encaissement."""
+        if not is_platform_admin(request.user):
+            return deny("La liste des mandataires est reservee a l'administrateur.")
+        queryset = User.objects.filter(
+            Q(collector_profile_active=True) | Q(role=User.Role.COLLECTOR),
+            is_active=True,
+        ).distinct().order_by("first_name", "last_name", "phone")
+        return Response({"results": UserSerializer(queryset, many=True, context={"request": request}).data})
 
     def destroy(self, request, *args, **kwargs):
         if not is_platform_admin(request.user):
@@ -932,7 +1033,11 @@ class UserViewSet(viewsets.ModelViewSet):
         clubs = accessible_clubs(request.user)
         memberships = Membership.objects.filter(user=member, club__in=clubs).exclude(role=Membership.Role.LENDER).select_related("club", "user", "invited_by").order_by("club__name", "role")
         deposits = Deposit.objects.filter(lender=member).select_related("club", "lender").order_by("-created_at")
-        loans = Loan.objects.filter(Q(borrower=member) | Q(borrowers__user=member), club__in=clubs).distinct().select_related("club", "borrower").prefetch_related("installments", "fundings__lender", "borrowers__user").order_by("-created_at")
+        loans = Loan.objects.filter(
+            Q(borrower=member) |
+            Q(borrowers__user=member, borrowers__status__in=[LoanBorrower.Status.ACCEPTED, LoanBorrower.Status.PENDING]),
+            club__in=clubs,
+        ).distinct().select_related("club", "borrower").prefetch_related("installments", "fundings__lender", "borrowers__user").order_by("-created_at")
         fundings = LoanFunding.objects.filter(lender=member).select_related("loan", "loan__club").order_by("-created_at")
         withdrawals = Withdrawal.objects.filter(lender=member).select_related("club", "lender").order_by("-created_at")
         if not is_platform_admin(request.user):
@@ -942,6 +1047,13 @@ class UserViewSet(viewsets.ModelViewSet):
         collections = Loan.objects.filter(collection_agent=member).select_related("club", "borrower", "collection_agent").prefetch_related("installments", "borrowers__user").order_by("-collection_agent_assigned_at")
         validated_deposits = deposits.filter(status=Deposit.Status.VALIDATED)
         available_capital = lender_total_available(member)
+        borrower_shares = LoanBorrower.objects.filter(
+            loan__in=loans, user=member, status=LoanBorrower.Status.ACCEPTED,
+        ).select_related("loan").prefetch_related("installments")
+        borrowed_total = sum((share.share_amount for share in borrower_shares), Decimal("0"))
+        borrower_due = sum((share.debt_total for share in borrower_shares), Decimal("0"))
+        borrower_repaid = sum((share.total_paid for share in borrower_shares), Decimal("0"))
+        borrower_balance = sum((share.debt_balance for share in borrower_shares), Decimal("0"))
         return Response({
             "user": UserSerializer(member).data,
             "memberships": MembershipSerializer(memberships, many=True).data,
@@ -951,10 +1063,10 @@ class UserViewSet(viewsets.ModelViewSet):
                 "placed": str(money(fundings.aggregate(total=Sum("amount"))["total"] or 0)),
                 "expected_gain": str(money(fundings.aggregate(total=Sum("expected_gain"))["total"] or 0)),
                 "interest_earned": str(money(fundings.aggregate(total=Sum("interest_earned"))["total"] or 0)),
-                "borrowed": str(money(loans.aggregate(total=Sum("amount"))["total"] or 0)),
-                "total_due": str(money(loans.aggregate(total=Sum("total_due"))["total"] or 0)),
-                "repaid": str(money(loans.aggregate(total=Sum("total_paid"))["total"] or 0)),
-                "balance": str(money(sum((loan.balance for loan in loans), Decimal("0")))),
+                "borrowed": str(money(borrowed_total)),
+                "total_due": str(money(borrower_due)),
+                "repaid": str(money(borrower_repaid)),
+                "balance": str(money(borrower_balance)),
             },
             "deposits": DepositSerializer(deposits[:20], many=True, context={"request": request}).data,
             "loans": LoanSerializer(loans[:20], many=True, context={"request": request}).data,
@@ -1180,7 +1292,9 @@ class LoanBorrowerViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 
     @action(detail=False, methods=["get"])
     def pending(self, request):
-        queryset = self.get_queryset().filter(status=LoanBorrower.Status.PENDING, loan__status=Loan.Status.PENDING_PARTNERS)
+        queryset = self.get_queryset().filter(status=LoanBorrower.Status.PENDING).filter(
+            Q(loan__status=Loan.Status.PENDING_PARTNERS) | Q(replacement_for__isnull=False),
+        )
         return Response({"results": [{
             **LoanBorrowerSerializer(row).data,
             "loan": str(row.loan_id),
@@ -1190,6 +1304,8 @@ class LoanBorrowerViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
             "currency": row.loan.currency,
             "purpose": row.loan.purpose,
             "requested_by": row.loan.borrower.display_name,
+            "is_replacement": bool(row.replacement_for_id),
+            "replaces": row.replacement_for.user.display_name if row.replacement_for_id else None,
         } for row in queryset]})
 
 
@@ -1498,10 +1614,13 @@ class LoanViewSet(viewsets.ModelViewSet):
             # Le preteur voit le marche des prets valides, sans lien avec les clubs.
             queryset = Loan.objects.filter(club__status=Club.Status.ACTIVE)
         elif profile == User.Role.COLLECTOR:
-            queryset = Loan.objects.filter(collection_agent=user)
+            queryset = Loan.objects.filter(Q(collection_agent=user) | Q(borrowers__collection_agent=user)).distinct()
         else:
             queryset = Loan.objects.filter(club__in=accessible_clubs(user))
-        queryset = queryset.select_related("club", "borrower", "collection_agent", "purpose_reference").prefetch_related("installments", "fundings__lender", "repayments__payer", "borrowers__user")
+        queryset = queryset.select_related("club", "borrower", "collection_agent", "purpose_reference").prefetch_related(
+            "installments", "fundings__lender", "repayments__payer", "borrowers__user",
+            "borrowers__collection_agent", "borrowers__replacement_for__user", "borrowers__installments",
+        )
         if profile == User.Role.BORROWER and not is_platform_admin(user):
             queryset = queryset.filter(Q(borrower=user) | Q(borrowers__user=user)).distinct()
         elif profile == User.Role.LENDER and not is_platform_admin(user):
@@ -1642,11 +1761,30 @@ class LoanViewSet(viewsets.ModelViewSet):
         row = loan.borrowers.filter(user=request.user).first()
         if not row or row.is_primary:
             return deny("Vous n'etes pas invite sur ce pret collectif.")
-        if loan.status != Loan.Status.PENDING_PARTNERS or row.status != LoanBorrower.Status.PENDING:
-            return deny("Cette invitation ne peut plus etre traitee.", 400)
         serializer = CollectiveResponseSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        if row.replacement_for_id:
+            if row.status != LoanBorrower.Status.PENDING:
+                return deny("Cette demande de remplacement ne peut plus etre traitee.", 400)
+            before_disbursement = not loan.disbursed_at
+            if not data["accept"]:
+                row.status = LoanBorrower.Status.DECLINED
+                row.responded_at = timezone.now()
+                row.decision_reason = data.get("reason", "")
+                row.save(update_fields=["status", "responded_at", "decision_reason", "updated_at"])
+                notify(loan.borrower, "Remplacement refuse", f"{request.user.display_name} a refuse le remplacement. L'ancien participant reste rattache a l'emprunt.", "collective_replacement", {"loan": str(loan.id)})
+            else:
+                accept_borrower_replacement(row, request.user)
+                notify(loan.borrower, "Participant remplace" if before_disbursement else "Dette reattribuee", f"{request.user.display_name} a accepte de rejoindre le pret {loan.reference}." if before_disbursement else f"{request.user.display_name} a accepte de reprendre la dette sur {loan.reference}.", "collective_replacement", {"loan": str(loan.id)})
+            loan.refresh_from_db()
+            if before_disbursement and collective_is_ready(loan):
+                submit_loan(loan, request.user)
+                for item in loan.borrowers.filter(status=LoanBorrower.Status.ACCEPTED).select_related("user"):
+                    notify(item.user, "Pret collectif transmis", f"Le pret {loan.reference} est complet et transmis au chef du club pour validation.", "collective", {"loan": str(loan.id)})
+            return Response(self.get_serializer(loan).data)
+        if loan.status != Loan.Status.PENDING_PARTNERS or row.status != LoanBorrower.Status.PENDING:
+            return deny("Cette invitation ne peut plus etre traitee.", 400)
         if not data["accept"]:
             row.status = LoanBorrower.Status.DECLINED
             row.responded_at = timezone.now()
@@ -1711,16 +1849,45 @@ class LoanViewSet(viewsets.ModelViewSet):
         if not is_platform_admin(request.user):
             return deny("Le decaissement est reserve a l'administrateur.")
         loan = self.get_object()
-        serializer = CollectionAgentSerializer(data=request.data)
+        serializer = DisbursementSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         agent = serializer.validated_data.get("agent")
-        if agent and agent.id in {loan.borrower_id, *loan.borrowers.values_list("user_id", flat=True)}:
+        active_shares = list(loan.borrowers.filter(status=LoanBorrower.Status.ACCEPTED).select_related("user"))
+        borrower_ids = {share.user_id for share in active_shares}
+        if agent and agent.id in {loan.borrower_id, *borrower_ids}:
             return Response({"agent": "Un emprunteur du pret ne peut pas en etre le mandataire."}, status=400)
+        assignments = serializer.validated_data.get("borrower_agents", [])
+        assignments_by_share = {}
+        for assignment in assignments:
+            share_id = assignment["loan_borrower"]
+            if share_id in assignments_by_share:
+                return Response({"borrower_agents": "Chaque co-emprunteur ne peut avoir qu'un seul mandataire."}, status=400)
+            assignments_by_share[share_id] = assignment.get("agent")
+        if loan.is_collective:
+            expected_ids = {share.id for share in active_shares}
+            unknown_ids = set(assignments_by_share) - expected_ids
+            if unknown_ids:
+                return Response({"borrower_agents": "Une dette selectionnee n'appartient pas a ce pret collectif."}, status=400)
+            missing_ids = expected_ids - set(assignments_by_share)
+            if missing_ids:
+                return Response({"borrower_agents": "Choisissez un mandataire ou l'administration pour chaque co-emprunteur."}, status=400)
+            if any(selected and selected.id in borrower_ids for selected in assignments_by_share.values()):
+                return Response({"borrower_agents": "Un co-emprunteur ne peut pas etre mandataire d'une dette de ce pret."}, status=400)
         loan = disburse_loan(loan, request.user)
-        loan.collection_agent = agent
-        loan.collection_agent_assigned_at = timezone.now() if agent else None
+        assigned_at = timezone.now()
+        loan.collection_agent = None if loan.is_collective else agent
+        loan.collection_agent_assigned_at = None if loan.is_collective or not agent else assigned_at
         loan.save(update_fields=["collection_agent", "collection_agent_assigned_at", "updated_at"])
-        if agent:
+        if loan.is_collective:
+            for share in active_shares:
+                selected_agent = assignments_by_share[share.id]
+                share.collection_agent = selected_agent
+                share.collection_agent_assigned_at = assigned_at if selected_agent else None
+                share.save(update_fields=["collection_agent", "collection_agent_assigned_at", "updated_at"])
+                if selected_agent:
+                    audit(request.user, "loan.borrower_agent_assigned_at_disbursement", share, new={"agent": str(selected_agent.id)})
+                    notify(selected_agent, "Nouveau mandat individuel", f"Vous encaissez la dette de {share.user.display_name} sur le pret {loan.reference}.", "collection", {"loan": str(loan.id), "share": str(share.id)})
+        elif agent:
             audit(request.user, "loan.agent_assigned_at_disbursement", loan, new={"agent": str(agent.id)})
             notify(agent, "Nouveau mandat d'encaissement", f"Vous encaissez les remboursements du pret {loan.reference}.", "collection", {"loan": str(loan.id)})
         return Response(self.get_serializer(loan).data)
@@ -1746,6 +1913,50 @@ class LoanViewSet(viewsets.ModelViewSet):
         if previous and previous != agent:
             notify(previous, "Mandat retire", f"Vous n'encaissez plus le pret {loan.reference}.", "collection", {"loan": str(loan.id)})
         return Response(self.get_serializer(loan).data)
+
+    @action(detail=True, methods=["post"], url_path="assign-borrower-agent")
+    @transaction.atomic
+    def assign_borrower_agent(self, request, pk=None):
+        """Affecte un mandataire a une seule dette d'un emprunt collectif."""
+        if not is_platform_admin(request.user):
+            return deny("La designation des mandataires est reservee a l'administrateur.")
+        loan = self.get_object()
+        share = loan.borrowers.filter(pk=request.data.get("loan_borrower"), status=LoanBorrower.Status.ACCEPTED).select_related("user", "collection_agent").first()
+        if not share:
+            return Response({"loan_borrower": "Dette individuelle introuvable."}, status=400)
+        serializer = CollectionAgentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        agent = serializer.validated_data.get("agent")
+        if agent and loan.borrowers.filter(user=agent, status=LoanBorrower.Status.ACCEPTED).exists():
+            return Response({"agent": "Un emprunteur de ce pret ne peut pas encaisser une de ses dettes."}, status=400)
+        previous = share.collection_agent
+        share.collection_agent = agent
+        share.collection_agent_assigned_at = timezone.now() if agent else None
+        share.save(update_fields=["collection_agent", "collection_agent_assigned_at", "updated_at"])
+        audit(request.user, "loan.borrower_agent_assigned" if agent else "loan.borrower_agent_cleared", share, new={"agent": str(agent.id) if agent else None})
+        if agent:
+            notify(agent, "Mandat de dette individuelle", f"Vous encaissez la dette de {share.user.display_name} sur {loan.reference}.", "collection", {"loan": str(loan.id), "share": str(share.id)})
+        if previous and previous != agent:
+            notify(previous, "Mandat individuel retire", f"Vous n'encaissez plus la dette de {share.user.display_name} sur {loan.reference}.", "collection", {"loan": str(loan.id), "share": str(share.id)})
+        loan.refresh_from_db()
+        return Response(self.get_serializer(loan).data)
+
+    @action(detail=True, methods=["post"], url_path="replace-borrower")
+    def replace_borrower(self, request, pk=None):
+        """L'initiateur propose le transfert du solde d'un participant."""
+        loan = self.get_object()
+        if request.user != loan.borrower and not is_platform_admin(request.user):
+            return deny("Seul l'initiateur peut remplacer un co-emprunteur.")
+        source = loan.borrowers.filter(pk=request.data.get("loan_borrower")).first()
+        if not source:
+            return Response({"loan_borrower": "Participant introuvable."}, status=400)
+        phone = re.sub(r"[\s\-().]", "", str(request.data.get("phone", "")))
+        replacement = User.objects.filter(phone__endswith=phone[-9:], is_active=True).first() if len(phone) >= 9 else None
+        if not replacement:
+            return Response({"phone": "Aucun compte actif ne correspond a ce numero."}, status=400)
+        pending = request_borrower_replacement(loan, source, replacement, request.user)
+        loan.refresh_from_db()
+        return Response({"request": LoanBorrowerSerializer(pending, context={"request": request}).data, "loan": self.get_serializer(loan).data}, status=201)
 
     # -------------------------------------------------------------- placement
     @action(detail=True, methods=["post"])
@@ -1840,16 +2051,21 @@ class LoanViewSet(viewsets.ModelViewSet):
     # ------------------------------------------------------------ encaissement
     @action(detail=True, methods=["post"], url_path="record-payment")
     def record_payment(self, request, pk=None):
-        """Encaissement : administrateur ou mandataire designe sur ce pret."""
+        """Encaissement : chaque dette collective est traitee separement."""
         loan = self.get_object()
-        if not can_collect(request.user, loan):
-            return deny("Seul l'administrateur ou le mandataire designe peut encaisser ce pret.")
         borrower = None
+        share = None
         borrower_id = request.data.get("borrower")
         if borrower_id:
             borrower = User.objects.filter(pk=borrower_id).first()
             if not borrower:
                 return Response({"borrower": "Co-emprunteur introuvable."}, status=400)
+            share = loan.borrowers.filter(user=borrower, status=LoanBorrower.Status.ACCEPTED).first()
+        if loan.is_collective and not borrower_id and not is_platform_admin(request.user):
+            share = loan.borrowers.filter(collection_agent=request.user, status=LoanBorrower.Status.ACCEPTED).first()
+            borrower = share.user if share else None
+        if not can_collect(request.user, loan, share):
+            return deny("Seul l'administrateur ou le mandataire de cette dette peut encaisser ce remboursement.")
         repayment = record_repayment(
             loan, request.user, request.data.get("amount", 0),
             request.data.get("payment_method", "cash"), borrower=borrower,
@@ -1861,8 +2077,10 @@ class LoanViewSet(viewsets.ModelViewSet):
         """Prets a encaisser par l'utilisateur connecte (admin ou mandataire)."""
         queryset = Loan.objects.filter(status__in=[Loan.Status.CURRENT, Loan.Status.LATE])
         if not is_platform_admin(request.user):
-            queryset = queryset.filter(collection_agent=request.user)
-        queryset = queryset.select_related("club", "borrower").prefetch_related("installments", "borrowers__user").order_by("-created_at")
+            queryset = queryset.filter(Q(collection_agent=request.user) | Q(borrowers__collection_agent=request.user)).distinct()
+        queryset = queryset.select_related("club", "borrower").prefetch_related(
+            "installments", "borrowers__user", "borrowers__collection_agent", "borrowers__installments",
+        ).order_by("-created_at")
         return Response({"results": self.get_serializer(queryset, many=True).data})
 
 
@@ -1930,8 +2148,13 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
         reason = request.data.get("reason", "")
         if not approve and not reason:
             return Response({"reason": "Le motif est obligatoire."}, status=400)
-        if approve and lender_total_available(withdrawal.lender) < withdrawal.amount:
-            return Response({"detail": "Le capital libre est insuffisant."}, status=400)
+        if approve:
+            if withdrawal.source == Withdrawal.Source.LEADER_COMMISSION:
+                available = leader_commission_wallet(withdrawal.lender, withdrawal.club)["available"] + withdrawal.amount
+                if available < withdrawal.amount:
+                    return Response({"detail": "La commission disponible est insuffisante."}, status=400)
+            elif lender_total_available(withdrawal.lender) < withdrawal.amount:
+                return Response({"detail": "Le capital libre est insuffisant."}, status=400)
         withdrawal.status = Withdrawal.Status.PAID if approve else Withdrawal.Status.REJECTED
         withdrawal.reviewed_by = request.user
         withdrawal.decision_reason = reason

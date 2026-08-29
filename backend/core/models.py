@@ -505,6 +505,7 @@ class LoanBorrower(TimeStampedModel):
         ACCEPTED = "accepted", "Acceptee"
         PENDING = "pending", "En attente"
         DECLINED = "declined", "Refusee"
+        REMOVED = "removed", "Retiree"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     loan = models.ForeignKey(Loan, on_delete=models.CASCADE, related_name="borrowers")
@@ -519,6 +520,11 @@ class LoanBorrower(TimeStampedModel):
     decision_reason = models.TextField(blank=True)
     principal_repaid = models.DecimalField(max_digits=16, decimal_places=2, default=0)
     total_paid = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    collection_agent = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="collected_loan_shares")
+    collection_agent_assigned_at = models.DateTimeField(null=True, blank=True)
+    replacement_for = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT, related_name="replacement_requests")
+    removed_at = models.DateTimeField(null=True, blank=True)
+    removed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="removed_loan_borrowers")
 
     class Meta:
         ordering = ["-is_primary", "created_at"]
@@ -529,6 +535,62 @@ class LoanBorrower(TimeStampedModel):
         if not self.loan.amount:
             return Decimal("0")
         return self.share_amount / self.loan.amount
+
+    @property
+    def debt_total(self):
+        rows = list(self.installments.all())
+        if rows:
+            return sum((item.total_due_amount for item in rows), Decimal("0"))
+        return (self.loan.total_due * self.share_ratio).quantize(Decimal("0.01"))
+
+    @property
+    def debt_balance(self):
+        if self.status == self.Status.REMOVED:
+            return Decimal("0")
+        return max(self.debt_total - self.total_paid, Decimal("0"))
+
+
+class BorrowerInstallment(TimeStampedModel):
+    """Echeance propre a une quote-part d'un emprunt collectif."""
+
+    class Status(models.TextChoices):
+        UPCOMING = "upcoming", "A venir"
+        DUE = "due", "Due"
+        PARTIAL = "partial", "Partielle"
+        PAID = "paid", "Payee"
+        LATE = "late", "En retard"
+        TRANSFERRED = "transferred", "Transferee"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    loan_borrower = models.ForeignKey(LoanBorrower, on_delete=models.CASCADE, related_name="installments")
+    number = models.PositiveSmallIntegerField()
+    due_date = models.DateField()
+    principal_due = models.DecimalField(max_digits=16, decimal_places=2)
+    interest_due = models.DecimalField(max_digits=16, decimal_places=2)
+    fee_due = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    leader_commission_due = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    penalty_due = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    principal_paid = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    interest_paid = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    fee_paid = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    leader_commission_paid = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    penalty_paid = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    paid_amount = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.UPCOMING)
+
+    class Meta:
+        ordering = ["due_date", "number"]
+        constraints = [models.UniqueConstraint(fields=["loan_borrower", "number"], name="unique_borrower_installment")]
+
+    @property
+    def total_due_amount(self):
+        return self.principal_due + self.interest_due + self.fee_due + self.leader_commission_due + self.penalty_due
+
+    @property
+    def remaining_due(self):
+        if self.status == self.Status.TRANSFERRED:
+            return Decimal("0")
+        return max(self.total_due_amount - self.paid_amount, Decimal("0"))
 
 
 class LoanFunding(TimeStampedModel):
@@ -604,6 +666,7 @@ class Repayment(FinancialModel):
         REVERSED = "reversed", "Contrepasse"
 
     loan = models.ForeignKey(Loan, on_delete=models.PROTECT, related_name="repayments")
+    loan_borrower = models.ForeignKey(LoanBorrower, null=True, blank=True, on_delete=models.PROTECT, related_name="repayments")
     payer = models.ForeignKey(User, on_delete=models.PROTECT, related_name="repayments")
     payment_method = models.CharField(max_length=40, default="cash")
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.VALIDATED)
@@ -616,6 +679,14 @@ class Repayment(FinancialModel):
 
 
 class Withdrawal(FinancialModel):
+    class Source(models.TextChoices):
+        LENDER = "lender", "Fonds preteur"
+        LEADER_COMMISSION = "leader_commission", "Commission chef de club"
+
+    class Destination(models.TextChoices):
+        CASH = "cash", "Recuperation externe"
+        LENDER_WALLET = "lender_wallet", "Compte preteur"
+
     class Status(models.TextChoices):
         SUBMITTED = "submitted", "Soumise"
         REVIEW = "review", "En etude"
@@ -626,6 +697,8 @@ class Withdrawal(FinancialModel):
 
     club = models.ForeignKey(Club, null=True, blank=True, on_delete=models.PROTECT, related_name="withdrawals")
     lender = models.ForeignKey(User, on_delete=models.PROTECT, related_name="withdrawals")
+    source = models.CharField(max_length=24, choices=Source.choices, default=Source.LENDER)
+    destination = models.CharField(max_length=24, choices=Destination.choices, default=Destination.CASH)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.SUBMITTED)
     decision_reason = models.TextField(blank=True)
     reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="reviewed_withdrawals")

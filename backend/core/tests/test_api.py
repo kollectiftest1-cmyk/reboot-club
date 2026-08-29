@@ -64,6 +64,35 @@ class PermissionTests(APITestCase):
         self.assertEqual(configuration.status_code, 200)
         self.assertEqual(configuration.data["default_commission_rate"], "2.50")
 
+    def test_admin_creates_collector_and_lists_secondary_collector_profiles(self):
+        admin = User.objects.create_user("+243810000091", email="admin91@test.cd", password="Password123!", role=User.Role.ADMIN)
+        borrower = User.objects.create_user("+243810000092", email="borrower92@test.cd", password="Password123!", role=User.Role.BORROWER)
+        self.client.force_authenticate(admin)
+
+        created = self.client.post("/api/v1/users/", {
+            "phone": "+243 810 000 093", "first_name": "Mado", "last_name": "Mandataire",
+            "password": "Mandat2026!", "role": "collector",
+        }, format="json")
+        self.assertEqual(created.status_code, 201)
+        self.assertTrue(created.data["collector_profile_active"])
+        collector = User.objects.get(pk=created.data["id"])
+        self.assertEqual(collector.phone, "+243810000093")
+        self.assertTrue(collector.email.endswith("@users.reboot.local"))
+
+        activated = self.client.post(f"/api/v1/users/{borrower.id}/set-collector-profile/", {"active": True}, format="json")
+        self.assertEqual(activated.status_code, 200)
+        listed = self.client.get("/api/v1/users/collectors/")
+        self.assertEqual(listed.status_code, 200)
+        listed_ids = {item["id"] for item in listed.data["results"]}
+        self.assertEqual(listed_ids, {collector.id, borrower.id})
+
+        duplicate = self.client.post("/api/v1/users/", {
+            "phone": "+243-810-000-093", "first_name": "Double", "last_name": "Compte",
+            "password": "Mandat2026!", "role": "collector",
+        }, format="json")
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertIn("deja", str(duplicate.data["errors"]["phone"]).lower())
+
     def test_leader_cannot_create_admin_or_validate_identity(self):
         self.client.force_authenticate(self.leader_a)
         create_response = self.client.post("/api/v1/users/", {

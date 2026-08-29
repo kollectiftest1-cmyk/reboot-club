@@ -28,6 +28,7 @@ import { LoanDetailScreen } from "@/screens/LoanDetailScreen";
 import { LoansScreen } from "@/screens/LoansScreen";
 import { LoginScreen } from "@/screens/LoginScreen";
 import { LegalScreen } from "@/screens/LegalScreen";
+import { LeaderCommissionsScreen } from "@/screens/LeaderCommissionsScreen";
 import { ManagementScreen } from "@/screens/ManagementScreen";
 import { MembersScreen } from "@/screens/MembersScreen";
 import { MemberFormScreen } from "@/screens/MemberFormScreen";
@@ -115,6 +116,7 @@ export function AppNavigator() {
         <Stack.Screen name="Settings" component={SettingsScreen}/>
         <Stack.Screen name="PlatformSettings" component={PlatformSettingsScreen}/>
         <Stack.Screen name="LoanPurposes" component={LoanPurposesScreen}/>
+        <Stack.Screen name="LeaderCommissions" component={LeaderCommissionsScreen}/>
       </Stack.Navigator> : <LoginScreen/>}
     </NavigationContainer>;
 }

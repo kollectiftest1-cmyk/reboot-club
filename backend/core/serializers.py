@@ -7,7 +7,7 @@ from rest_framework import serializers
 
 from .models import (
     LOAN_DURATIONS, REPAYMENT_FREQUENCIES, duration_in_months,
-    AuditLog, Club, ClubMessage, ClubRateTier, Deposit, Dispute, EconomicActivity, Installment, Invitation, KYCApplication,
+    AuditLog, BorrowerInstallment, Club, ClubMessage, ClubRateTier, Deposit, Dispute, EconomicActivity, Installment, Invitation, KYCApplication,
     Loan, LoanBorrower, LoanFunding, LoanPurpose, Membership, Notification, OTPChallenge, PlatformSettings,
     Repayment, User, Withdrawal, allowed_frequencies, installment_count,
 )
@@ -133,9 +133,17 @@ class ManagedUserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["id", "email", "phone", "first_name", "last_name", "name", "role", "password", "club", "membership_role", "kyc_verified", "is_active"]
-        read_only_fields = ["kyc_verified", "is_active"]
-        extra_kwargs = {"email": {"required": False, "allow_blank": True}}
+        fields = ["id", "email", "phone", "first_name", "last_name", "name", "role", "password", "club", "membership_role", "collector_profile_active", "kyc_verified", "is_active"]
+        read_only_fields = ["collector_profile_active", "kyc_verified", "is_active"]
+        extra_kwargs = {"email": {"required": False, "allow_blank": True}, "phone": {"validators": []}}
+
+    def validate_phone(self, value):
+        normalized = value.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+        if not normalized.startswith("+") or not normalized[1:].isdigit() or len(normalized) < 10:
+            raise serializers.ValidationError("Utilisez le format international, par exemple +243810000000.")
+        if User.objects.filter(phone=normalized).exists():
+            raise serializers.ValidationError("Un compte utilise deja ce numero de telephone.")
+        return normalized
 
     def validate(self, attrs):
         request = self.context["request"]
@@ -184,12 +192,20 @@ class ManagedUserUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ["email", "phone", "first_name", "last_name", "role", "kyc_verified", "is_active"]
-        extra_kwargs = {"email": {"required": False, "allow_blank": True}}
+        extra_kwargs = {"email": {"required": False, "allow_blank": True}, "phone": {"validators": []}}
 
     def validate(self, attrs):
         if self.context["request"].user.role != User.Role.ADMIN and not self.context["request"].user.is_superuser:
             raise serializers.ValidationError("Modification reservee a l'administrateur.")
         return attrs
+
+    def validate_phone(self, value):
+        normalized = value.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+        if not normalized.startswith("+") or not normalized[1:].isdigit() or len(normalized) < 10:
+            raise serializers.ValidationError("Utilisez le format international, par exemple +243810000000.")
+        if User.objects.exclude(pk=self.instance.pk).filter(phone=normalized).exists():
+            raise serializers.ValidationError("Un compte utilise deja ce numero de telephone.")
+        return normalized
 
     def update(self, instance, validated_data):
         instance = super().update(instance, validated_data)
@@ -419,14 +435,53 @@ class LoanFundingSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class BorrowerInstallmentSerializer(serializers.ModelSerializer):
+    total_due = serializers.DecimalField(source="total_due_amount", max_digits=16, decimal_places=2, read_only=True)
+    remaining_due = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    progress_percent = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BorrowerInstallment
+        fields = [
+            "id", "number", "due_date", "principal_due", "interest_due", "fee_due",
+            "leader_commission_due", "penalty_due", "total_due", "paid_amount",
+            "remaining_due", "progress_percent", "status",
+        ]
+        read_only_fields = fields
+
+    def get_progress_percent(self, obj):
+        return 100 if not obj.total_due_amount else min(100, round(obj.paid_amount / obj.total_due_amount * 100))
+
+
 class LoanBorrowerSerializer(serializers.ModelSerializer):
     user_detail = UserSerializer(source="user", read_only=True)
     name = serializers.CharField(source="user.display_name", read_only=True)
+    collection_agent_name = serializers.CharField(source="collection_agent.display_name", read_only=True)
+    installments = BorrowerInstallmentSerializer(many=True, read_only=True)
+    total_due = serializers.DecimalField(source="debt_total", max_digits=16, decimal_places=2, read_only=True)
+    balance = serializers.DecimalField(source="debt_balance", max_digits=16, decimal_places=2, read_only=True)
+    overdue_count = serializers.SerializerMethodField()
+    replacement_for_name = serializers.CharField(source="replacement_for.user.display_name", read_only=True)
+    can_collect = serializers.SerializerMethodField()
 
     class Meta:
         model = LoanBorrower
-        fields = ["id", "user", "name", "user_detail", "share_amount", "is_primary", "status", "responded_at", "decision_reason", "principal_repaid", "total_paid"]
+        fields = [
+            "id", "user", "name", "user_detail", "share_amount", "is_primary", "status", "responded_at",
+            "decision_reason", "principal_repaid", "total_paid", "total_due", "balance", "installments",
+            "overdue_count", "collection_agent", "collection_agent_name", "collection_agent_assigned_at",
+            "replacement_for", "replacement_for_name", "removed_at", "can_collect",
+        ]
         read_only_fields = fields
+
+    def get_overdue_count(self, obj):
+        return obj.installments.filter(status=BorrowerInstallment.Status.LATE).count()
+
+    def get_can_collect(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return False
+        return bool(request.user.role == User.Role.ADMIN or request.user.is_superuser or obj.collection_agent_id == request.user.id)
 
 
 class LoanSerializer(serializers.ModelSerializer):
@@ -503,6 +558,8 @@ class LoanSerializer(serializers.ModelSerializer):
             return False
         if request.user.role == User.Role.ADMIN or request.user.is_superuser:
             return True
+        if obj.is_collective:
+            return any(item.collection_agent_id == request.user.id for item in obj.borrowers.all())
         return bool(obj.collection_agent_id and obj.collection_agent_id == request.user.id)
 
     def get_borrower_credit_score(self, obj):
@@ -525,8 +582,8 @@ class LoanSerializer(serializers.ModelSerializer):
         row = next((item for item in obj.borrowers.all() if item.user_id == request.user.id), None)
         if not row:
             return None
-        ratio = row.share_amount / obj.amount if obj.amount else Decimal("0")
-        share_due = money(obj.total_due * ratio)
+        ratio = row.share_amount / obj.amount if obj.amount and row.status != LoanBorrower.Status.REMOVED else Decimal("0")
+        share_due = row.debt_total
         return {
             "id": str(row.id),
             "share_amount": row.share_amount,
@@ -535,8 +592,12 @@ class LoanSerializer(serializers.ModelSerializer):
             "is_primary": row.is_primary,
             "total_due": share_due,
             "total_paid": row.total_paid,
-            "balance": max(share_due - row.total_paid, Decimal("0")),
+            "balance": row.debt_balance,
             "charge_total": money(obj.charge_total * ratio),
+            "collection_agent": row.collection_agent_id,
+            "collection_agent_name": row.collection_agent.display_name if row.collection_agent_id else None,
+            "overdue_count": row.installments.filter(status=BorrowerInstallment.Status.LATE).count(),
+            "installments": BorrowerInstallmentSerializer(row.installments.all(), many=True).data,
         }
 
     def get_my_funding(self, obj):
@@ -606,6 +667,13 @@ class LoanSerializer(serializers.ModelSerializer):
         }
 
     def get_repayments(self, obj):
+        repayments = obj.repayments.all()
+        request = self.context.get("request")
+        if request and request.user.is_authenticated and obj.is_collective and not (request.user.role == User.Role.ADMIN or request.user.is_superuser):
+            if request.user.current_profile == User.Role.BORROWER:
+                repayments = repayments.filter(payer=request.user)
+            elif request.user.current_profile == User.Role.COLLECTOR:
+                repayments = repayments.filter(loan_borrower__collection_agent=request.user)
         return [{
             "id": repayment.id,
             "reference": repayment.reference,
@@ -619,7 +687,7 @@ class LoanSerializer(serializers.ModelSerializer):
             "leader_commission_paid": repayment.leader_commission_paid,
             "penalty_paid": repayment.penalty_paid,
             "created_at": repayment.created_at,
-        } for repayment in obj.repayments.all()]
+        } for repayment in repayments]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -658,6 +726,17 @@ class LoanSerializer(serializers.ModelSerializer):
             data["funding_open_amount"] = None
             data["pending_funding_amount"] = None
             data["my_funding"] = None
+            if instance.borrower_id != user.id:
+                data["borrowers"] = [item for item in data.get("borrowers", []) if str(item["user"]) == str(user.id)]
+            for borrower_row in data.get("borrowers") or []:
+                for installment in borrower_row.get("installments") or []:
+                    for field in ["interest_due", "fee_due", "leader_commission_due"]:
+                        installment[field] = None
+            if instance.is_collective and data.get("my_share"):
+                data["installments"] = data["my_share"].get("installments", [])
+                data["balance"] = data["my_share"].get("balance")
+                data["total_due"] = data["my_share"].get("total_due")
+                data["total_paid"] = next((item["total_paid"] for item in data.get("borrowers", []) if str(item["user"]) == str(user.id)), data["total_paid"])
             for item in data.get("installments") or []:
                 for field in ["interest_due", "fee_due", "leader_commission_due"]:
                     item[field] = None
@@ -676,6 +755,9 @@ class LoanSerializer(serializers.ModelSerializer):
             for item in data.get("repayments") or []:
                 for field in ["interest_paid", "fee_paid"]:
                     item[field] = None
+        elif profile == User.Role.COLLECTOR and instance.is_collective:
+            data["borrowers"] = [item for item in data.get("borrowers", []) if str(item.get("collection_agent")) == str(user.id)]
+            data["installments"] = []
         return data
 
     # ------------------------------------------------------------- validation
@@ -842,6 +924,19 @@ class CollectionAgentSerializer(serializers.Serializer):
     )
 
 
+class BorrowerAgentAssignmentSerializer(serializers.Serializer):
+    loan_borrower = serializers.UUIDField()
+    agent = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(Q(collector_profile_active=True) | Q(role=User.Role.COLLECTOR), is_active=True).distinct(),
+        required=False,
+        allow_null=True,
+    )
+
+
+class DisbursementSerializer(CollectionAgentSerializer):
+    borrower_agents = BorrowerAgentAssignmentSerializer(many=True, required=False)
+
+
 class CollectiveResponseSerializer(serializers.Serializer):
     accept = serializers.BooleanField(default=True)
     share_amount = serializers.DecimalField(max_digits=16, decimal_places=2, required=False, allow_null=True)
@@ -871,8 +966,8 @@ class WithdrawalSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Withdrawal
-        fields = ["id", "reference", "club", "club_name", "lender", "lender_name", "lender_avatar", "lender_selfie", "amount", "currency", "status", "decision_reason", "created_at"]
-        read_only_fields = ["reference", "lender", "currency", "status", "decision_reason"]
+        fields = ["id", "reference", "club", "club_name", "lender", "lender_name", "lender_avatar", "lender_selfie", "source", "destination", "amount", "currency", "status", "decision_reason", "created_at"]
+        read_only_fields = ["reference", "lender", "source", "destination", "currency", "status", "decision_reason"]
 
     def create(self, validated_data):
         club = validated_data.get("club")

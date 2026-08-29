@@ -25,4 +25,5 @@ export const statusLabels = {
     rejected: "Refusé", draft: "Brouillon", paid: "Payé", partial: "Partiel", upcoming: "À venir",
     open: "Ouvert", review: "En analyse", resolved: "Résolu", closed: "Clos", frozen: "Gelé",
     pending_partners: "Accords en attente", accepted: "Accepte", declined: "Refuse",
+    removed: "Remplace", transferred: "Transferee",
 };

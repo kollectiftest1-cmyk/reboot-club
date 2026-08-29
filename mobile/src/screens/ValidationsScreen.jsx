@@ -117,10 +117,10 @@ export function ValidationsScreen() {
             ...withdrawals.results.filter(item => ["submitted", "review"].includes(item.status)).map(item => ({
                 ...item,
                 type: "withdrawal",
-                operation: "Validation d'une demande de recuperation",
+                operation: item.source === "leader_commission" ? "Validation d'une recuperation de commission" : "Validation d'une demande de recuperation",
                 title: item.lender_name,
-                subtitle: `Portefeuille global du preteur`,
-                profileLine: "Profil concerne : Preteur",
+                subtitle: item.source === "leader_commission" ? `Commissions du club : ${item.club_name}` : "Portefeuille global du preteur",
+                profileLine: item.source === "leader_commission" ? "Profil concerne : Chef de club" : "Profil concerne : Preteur",
                 detailLabel: "Montant a retirer",
                 value: money(item.amount, item.currency),
                 person: { name: item.lender_name, avatar: item.lender_avatar, selfie: item.lender_selfie },
